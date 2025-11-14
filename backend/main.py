@@ -1,15 +1,3 @@
-"""
-Hospital Management System API
-
-This server provides:
-1. Hospital management with unique ID system
-2. User management (Admin, Doctor, Nurse, Patient roles)
-3. Patient management and tracking
-4. Appointment scheduling
-5. Department management
-6. ICU monitoring integration
-"""
-
 import asyncio
 import json
 import uvicorn
@@ -123,6 +111,9 @@ patient_data_by_window: Dict[int, List[Dict]] = {}
 max_window = 0
 # cache last known broadcast object for each patient
 last_known_by_patient: Dict[str, Dict[str, Any]] = {}
+
+# Lazy loading flag for models
+vitals_model_loaded = False
 
 # Real-time monitoring variables
 use_real_monitor_data = False
@@ -294,6 +285,19 @@ async def create_placeholder_patient(patient_id: str) -> Dict[str, Any]:
         "last_update_ts": None
     }
 
+def ensure_model_loaded():
+    """Lazy load the vitals model only when needed."""
+    global model, model_features, vitals_model_loaded
+
+    if not vitals_model_loaded:
+        print("🔄 Lazy loading vitals model...")
+        load_model()
+        vitals_model_loaded = True
+        if model is not None:
+            print("✅ Vitals model loaded successfully for AI predictions")
+        else:
+            print("⚠️ Vitals model failed to load, AI predictions disabled")
+
 def get_data_for_window(window: int) -> List[Dict[str, Any]]:
     """
     Gets the data for all TARGET_PATIENTS at a specific window (time).
@@ -348,7 +352,8 @@ def get_data_for_window(window: int) -> List[Dict[str, Any]]:
                             "status": status,
                         }
 
-            # AI model prediction
+            # AI model prediction - lazy load model if needed
+            ensure_model_loaded()
             if model is not None:
                 try:
                     model_input_list = [patient_row.get(f, 0) for f in model_features]
@@ -535,7 +540,6 @@ async def on_startup():
     else:
         print("📄 Initializing CSV MOCK data mode")
         # Load ICU monitoring data (CSV)
-        load_model()
         load_and_prepare_data()
 
     asyncio.create_task(data_broadcast_loop())
@@ -544,10 +548,22 @@ async def on_startup():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000)) # Render-friendly port
+    disable_reload = os.environ.get("DISABLE_DEV_RELOAD", "false").lower() == "true"
+
     print(f"--- Starting Uvicorn on 0.0.0.0:{port} ---")
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=port,
-        reload=True # Keep reload for local dev
-    )
+    if disable_reload:
+        print("⚙️ Production mode: reload disabled for better performance")
+        uvicorn.run(
+            "main:app",
+            host="0.0.0.0",
+            port=port,
+            reload=False
+        )
+    else:
+        print("🔄 Development mode: reload enabled for development")
+        uvicorn.run(
+            "main:app",
+            host="0.0.0.0",
+            port=port,
+            reload=True # Keep reload for local dev
+        )

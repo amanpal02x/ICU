@@ -25,7 +25,21 @@ router = APIRouter(prefix="/api", tags=["disease_prediction"])
 
 # Global model variable
 disease_model = None
+disease_model_loaded = False  # Lazy loading flag
 MODEL_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models", "disease_prediction_model.pkl")
+
+def ensure_disease_model_loaded():
+    """Lazy load the disease prediction model only when needed."""
+    global disease_model, disease_model_loaded
+
+    if not disease_model_loaded:
+        logger.info("🔄 Lazy loading disease prediction model...")
+        disease_model_loaded = True
+        if not load_disease_model():
+            logger.error("❌ Failed to load disease prediction model")
+            disease_model_loaded = False
+        else:
+            logger.info("✅ Disease prediction model loaded successfully")
 
 def load_disease_model():
     """Load the disease prediction model."""
@@ -219,10 +233,10 @@ async def predict_disease_from_image(
         if processed_image is None:
             raise HTTPException(status_code=500, detail="Failed to process image")
 
-        # Load model if not already loaded
+        # Ensure model is loaded (lazy loading)
+        ensure_disease_model_loaded()
         if disease_model is None:
-            if not load_disease_model():
-                raise HTTPException(status_code=500, detail="Disease prediction model could not be loaded")
+            raise HTTPException(status_code=500, detail="Disease prediction model could not be loaded")
 
         # Run prediction
         result = predict_disease(processed_image, patient_age)
@@ -252,6 +266,3 @@ async def get_model_status():
         "model_exists": model_exists,
         "status": "ready" if model_loaded else "not_loaded"
     }
-
-# Load model on startup
-load_disease_model()

@@ -18,7 +18,18 @@ class UniversalMonitorProcessor:
             print(f"Warning: MongoDB not available: {e}")
         self.model = None
         self.model_features = ["hr_mean", "spo2_mean", "sbp_mean", "dbp_mean"]
-        self.load_model()
+        self.model_loaded = False  # Lazy loading flag
+
+    def ensure_model_loaded(self):
+        """Lazy load the vitals model only when needed."""
+        if not self.model_loaded:
+            print("🔄 Lazy loading vitals model for monitor processor...")
+            self.load_model()
+            self.model_loaded = True
+            if self.model is not None:
+                print("✅ Monitor processor vitals model loaded successfully")
+            else:
+                print("⚠️ Monitor processor vitals model failed to load")
 
     def load_model(self):
         """Load the AI model for vital analysis"""
@@ -193,6 +204,9 @@ class UniversalMonitorProcessor:
 
     async def analyze_vitals(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Run AI analysis on the vitals"""
+
+        # Lazy load model if needed
+        self.ensure_model_loaded()
 
         if not self.model:
             return {"error": "AI model not loaded"}
