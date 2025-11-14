@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>ICU WebSocket — Persistent 16 Patients</title>
+<style>
+  :root{
+    --bg:#121212; --card:#181818; --muted:#9e9e9e; --danger:#FF5252; --ok:#4CAF50; --accent:#03DAC6;
+    --panel-border:#2b2b2b;
+  }
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg); color:#E0E0E0; margin:0; padding:20px;
+  }
+  h1{color:var(--accent); margin:0 0 16px; border-bottom:2px solid var(--accent); padding-bottom:8px;}
+  #status{padding:10px;border-radius:8px;margin-bottom:12px;font-weight:700}
+  .connecting{background:#373737;color:#FBC02D}
+  .connected{background:#1E5128;color:var(--ok)}
+  .error{background:#611a15;color:var(--danger)}
+  #grid{
+    display:grid;
+    grid-template-columns:repeat(auto-fill,minmax(260px,1fr));
+    gap:12px;
+  }
+  .card{
+    background:var(--card);
+    border:1px solid var(--panel-border);
+    border-radius:10px;
+    padding:12px;
+    min-height:160px;
+  }
+  .card h2{margin:0 0 6px;font-size:15px;color:#FFDFAE}
+  .meta{font-size:12px;color:var(--muted);margin-bottom:8px}
+  .vitals{font-family:"SFMono-Regular",Consolas,monospace;font-size:13px;line-height:1.6}
+  .label{color:var(--muted)}
+  .stable{color:var(--ok)}
+  .critical{color:var(--danger)}
+  .stale{opacity:0.45}
+  .last-upd{font-size:12px;color:var(--muted);margin-top:8px}
+</style>
+</head>
+<body>
+  <h1>ICU Dashboard — Persistent 16 Patients</h1>
+  <div id="status" class="connecting">Connecting to http://0.0.0.0:8000/ws ...</div>
+  <div id="grid"></div>
+
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+  const wsUrl = "http://0.0.0.0:8000/ws"; // backend WS
+  const TOTAL_PATIENTS = 16;
+  const grid = document.getElementById("grid");
+  const statusDiv = document.getElementById("status");
+
+  // Map patient IDs to names
+  const nameMap = {
+    '1': "J. Sonib",
+    '2': "A. Patel",
+    '3': "M. Johnson",
+    '4': "S. Rodriguez",
+    '5': "K. Chen",
+    '6': "T. Williams",
+    '7': "P. Singh",
+    '8': "R. Brown",
+    '9': "H. Mehta",
+    '10': "N. Khan",
+    '11': "C. Lee",
+    '12': "A. Das",
+    '13': "E. Kumar",
+    '14': "B. Verma",
+    '15': "S. Wright",
+    '16': "T. Zhang",
+  };
+
+  // cache for patients
+  const patientCache = {};
+
+  // Create 16 persistent cards
+  for (let i = 1; i <= TOTAL_PATIENTS; i++) {
+    const id = String(i);
+    patientCache[id] = {
+      patient_id: id,
+      name: nameMap[id] || `Patient ${id}`,
+      room: `10${id}-A`,
+      vitals: {
+        HR: { value: "—", status: "stable" },
+        RR: { value: "—", status: "stable" },
+        "SpO₂": { value: "—", status: "stable" },
+        SBP: { value: "—", status: "stable" },
+        DBP: { value: "—", status: "stable" }
+      },
+      ai_prediction: { risk_score_percent: 0, is_at_risk: false },
+      alarms: [],
+      lastUpdated: null
+    };
+
+    const card = document.createElement("div");
+    card.className = "card";
+    card.id = `patient-card-${id}`;
+    card.innerHTML = renderCardInner(patientCache[id]);
+    grid.appendChild(card);
+  }
+
+  // WebSocket connection
+  const socket = new WebSocket(wsUrl);
+
+  socket.addEventListener("open", () => {
+    statusDiv.textContent = `CONNECTED to ${wsUrl}`;
+    statusDiv.className = "connected";
+  });
+
+  socket.addEventListener("error", (e) => {
+    statusDiv.textContent = `ERROR connecting to ${wsUrl}`;
+    statusDiv.className = "error";
+    console.error("WebSocket error:", e);
+  });
+
+  socket.addEventListener("close", () => {
+    statusDiv.textContent = "DISCONNECTED";
+    statusDiv.className = "error";
+  });
+
+  // incoming data
+  socket.addEventListener("message", (evt) => {
+    try {
+      const data = JSON.parse(evt.data);
+      if (!Array.isArray(data)) {
+        console.warn("Unexpected message format (expected array):", data);
+        return;
+      }
+
+      data.forEach((p) => {
+        const id = String(p.patient_id);
+        const current = patientCache[id] || {};
+        current.vitals = {
+          HR: p.vitals?.HR || current.vitals?.HR || { value: "—", status: "stable" },
+          RR: p.vitals?.RR || current.vitals?.RR || { value: "—", status: "stable" },
+          "SpO₂": p.vitals?.["SpO₂"] || current.vitals?.["SpO₂"] || { value: "—", status: "stable" },
+          SBP: p.vitals?.SBP || current.vitals?.SBP || { value: "—", status: "stable" },
+          DBP: p.vitals?.DBP || current.vitals?.DBP || { value: "—", status: "stable" }
+        };
+        current.ai_prediction = p.ai_prediction || current.ai_prediction || { risk_score_percent: 0, is_at_risk: false };
+        current.alarms = p.alarms || current.alarms || [];
+        current.name = p.name && p.name !== "N/A" ? p.name : (nameMap[id] || current.name);
+        current.room = p.room || current.room || `10${id}-A`;
+        current.patient_id = id;
+        current.lastUpdated = Date.now();
+
+        patientCache[id] = current;
+        updateCard(id, current);
+      });
+    } catch (err) {
+      console.error("Failed to parse message:", err, evt.data);
+    }
+  });
+
+  // Card rendering
+  function renderCardInner(p) {
+    const riskPct = p.ai_prediction?.risk_score_percent ?? 0;
+    const riskClass = (p.ai_prediction?.is_at_risk) ? 'critical' : 'stable';
+    const last = p.lastUpdated ? timeAgo(p.lastUpdated) : 'never';
+    const HR = p.vitals?.HR?.value ?? '—';
+    const HRs = p.vitals?.HR?.status ?? 'stable';
+    const RR = p.vitals?.RR?.value ?? '—';
+    const RRs = p.vitals?.RR?.status ?? 'stable';
+    const SPO2 = p.vitals?.['SpO₂']?.value ?? '—';
+    const SPO2s = p.vitals?.['SpO₂']?.status ?? 'stable';
+    const SBP = p.vitals?.SBP?.value ?? '—';
+    const SBPs = p.vitals?.SBP?.status ?? 'stable';
+    const DBP = p.vitals?.DBP?.value ?? '—';
+    const DBPs = p.vitals?.DBP?.status ?? 'stable';
+
+    return `
+      <h2>👤 ${escapeHtml(p.name)} <span style="font-size:12px;color:var(--muted)">(${escapeHtml(p.room)})</span></h2>
+      <div class="meta">Patient ID: ${escapeHtml(p.patient_id)}</div>
+      <div class="vitals ${isStaleClass(p)}">
+        <div><span class="label">HR:</span> <span class="${HRs}">${HR}</span> | 
+             <span class="label">RR:</span> <span class="${RRs}">${RR}</span> | 
+             <span class="label">SpO₂:</span> <span class="${SPO2s}">${SPO2}</span></div>
+        <div><span class="label">SBP:</span> <span class="${SBPs}">${SBP}</span> | 
+             <span class="label">DBP:</span> <span class="${DBPs}">${DBP}</span></div>
+        <div style="margin-top:8px;"><span class="label">Risk Score:</span> 
+             <span class="${riskClass}">${riskPct}%</span></div>
+        <div class="last-upd">Last updated: <span id="last-${p.patient_id}">${last}</span></div>
+      </div>
+    `;
+  }
+
+  // Update single card
+  function updateCard(id, p) {
+    const card = document.getElementById(`patient-card-${id}`);
+    if (!card) return;
+    card.innerHTML = renderCardInner(p);
+  }
+
+  // fade stale
+  function isStaleClass(p) {
+    if (!p.lastUpdated) return '';
+    const age = (Date.now() - p.lastUpdated) / 1000;
+    return age > 4 ? 'stale' : '';
+  }
+
+  // update time labels
+  setInterval(() => {
+    for (let i = 1; i <= TOTAL_PATIENTS; i++) {
+      const id = String(i);
+      const p = patientCache[id];
+      if (!p) continue;
+      const span = document.getElementById(`last-${id}`);
+      if (span) span.textContent = timeAgo(p.lastUpdated);
+      const card = document.getElementById(`patient-card-${id}`);
+      if (card) {
+        const vitalsEl = card.querySelector('.vitals');
+        if (vitalsEl) {
+          if (isStaleClass(p)) vitalsEl.classList.add('stale');
+          else vitalsEl.classList.remove('stale');
+        }
+      }
+    }
+  }, 1000);
+
+  function timeAgo(ts) {
+    if (!ts) return 'never';
+    const s = Math.floor((Date.now() - ts) / 1000);
+    if (s < 2) return 'just now';
+    if (s < 60) return `${s}s ago`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60); return `${h}h ago`;
+  }
+
+  function escapeHtml(str) {
+    if (str === undefined || str === null) return '';
+    return String(str).replace(/[&<>"']/g, (m) => ({
+      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    }[m]));
+  }
+});
+</script>
+</body>
+</html>

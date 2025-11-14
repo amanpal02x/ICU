@@ -1,0 +1,171 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap");
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
+All colors MUST be HSL.
+*/
+
+@layer base {
+  :root {
+    --background: 215 25% 12%;
+    --foreground: 210 20% 92%;
+
+    --card: 215 22% 16%;
+    --card-foreground: 210 20% 92%;
+
+    --popover: 215 22% 16%;
+    --popover-foreground: 210 20% 92%;
+
+    --primary: 195 100% 50%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 215 20% 22%;
+    --secondary-foreground: 210 20% 92%;
+
+    --muted: 215 20% 20%;
+    --muted-foreground: 210 15% 60%;
+
+    --accent: 195 100% 50%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 85% 60%;
+    --destructive-foreground: 0 0% 100%;
+
+    --warning: 45 100% 51%;
+    --warning-foreground: 0 0% 0%;
+
+    --success: 174 72% 56%;
+    --success-foreground: 0 0% 0%;
+
+    --border: 215 20% 25%;
+    --input: 215 20% 25%;
+    --ring: 195 100% 50%;
+
+    --radius: 0.75rem;
+
+    --chart-1: 195 100% 50%;
+    --chart-2: 174 72% 56%;
+    --chart-3: 45 100% 51%;
+    --chart-4: 280 65% 60%;
+    --chart-5: 0 85% 60%;
+  }
+  .theme {
+    --animate-aurora: aurora 8s ease-in-out infinite alternate;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+@layer utilities {
+  .scrollbar-hide {
+    /* Firefox */
+    scrollbar-width: none;
+    /* Safari and Chrome */
+  }
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* ---break---
+*/
+
+@theme inline {
+  @keyframes aurora {
+    0% {
+      background-position: 0% 50%;
+      transform: rotate(-5deg) scale(0.9);
+    }
+    25% {
+      background-position: 50% 100%;
+      transform: rotate(5deg) scale(1.1);
+    }
+    50% {
+      background-position: 100% 50%;
+      transform: rotate(-3deg) scale(0.95);
+    }
+    75% {
+      background-position: 50% 0%;
+      transform: rotate(3deg) scale(1.05);
+    }
+    100% {
+      background-position: 0% 50%;
+      transform: rotate(-5deg) scale(0.9);
+    }
+  }
+}
+
+/* outer container (optional tuning) */
+.alarm-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* filled alarm box */
+.alarm-box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 14px;
+  border-radius: 10px;
+  min-height: 40px;
+  line-height: 1;
+  position: relative;
+  z-index: 0;
+  overflow: visible;
+}
+
+/* active (red) gradient fill — follows your color scheme */
+.alarm-box--active {
+  background: linear-gradient(90deg, #ff3b3b 0%, #b10000 50%, #ff3b3b 100%);
+  box-shadow: 0 3px 12px rgba(177, 0, 0, 0.25), 0 0 18px rgba(255, 59, 59, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* make sure text sits on top and is readable */
+.alarm-box .gradient-text,
+.alarm-box .normal-text,
+.alarm-box > * {
+  position: relative;
+  z-index: 1;
+  /* fallback to white if GradientText can't render clipped gradient text */
+  color: #ffffff !important;
+  -webkit-text-stroke: 0.2px rgba(0, 0, 0, 0.15); /* subtle edge for readability */
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.18);
+  font-weight: 700;
+}
+
+/* optional small pulse animation on the box to draw attention */
+@keyframes alarm-pulse {
+  0% {
+    box-shadow: 0 3px 12px rgba(177, 0, 0, 0.25),
+      0 0 20px rgba(255, 59, 59, 0.12);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow: 0 6px 20px rgba(177, 0, 0, 0.3),
+      0 0 28px rgba(255, 59, 59, 0.18);
+    transform: scale(1.02);
+  }
+  100% {
+    box-shadow: 0 3px 12px rgba(177, 0, 0, 0.25),
+      0 0 20px rgba(255, 59, 59, 0.12);
+    transform: scale(1);
+  }
+}
+
+/* apply the pulse only when needed (toggle by adding .is-pulsing) */
+.alarm-box--active.is-pulsing {
+  animation: alarm-pulse 3s ease-in-out infinite;
+}
