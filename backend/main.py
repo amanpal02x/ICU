@@ -93,8 +93,9 @@ app = FastAPI(title="Hospital Management System API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://icu-ruby.vercel.app",
+        "*",  # Allow all origins in production (will be restricted by environment later)
         "http://localhost:8080",
+        "http://localhost:5173",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -554,7 +555,7 @@ async def on_startup():
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000)) # Render-friendly port
+    port = int(os.environ.get("PORT", 10000)) # Render-friendly port
     disable_reload = os.environ.get("DISABLE_DEV_RELOAD", "false").lower() == "true"
 
     print(f"--- Starting Uvicorn on 0.0.0.0:{port} ---")
