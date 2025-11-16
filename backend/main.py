@@ -7,11 +7,15 @@ import joblib
 import numpy as np
 import traceback
 import os
+import sys
 from sklearn.base import BaseEstimator
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
+
+# Add the current directory to Python path for proper imports
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Import monitor processor for real-time data support
 from monitor_processor import UniversalMonitorProcessor
