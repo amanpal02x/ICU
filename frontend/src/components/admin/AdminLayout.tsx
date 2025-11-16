@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { Link, useLocation, Outlet } from 'react-router-dom';
+import { Link, useLocation, Outlet, useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { useAuth } from '@/hooks/useAuth';
 import {
   LayoutDashboard,
   Users,
@@ -15,7 +16,8 @@ import {
   BarChart3,
   Activity,
   Menu,
-  Heart
+  Heart,
+  LogOut
 } from 'lucide-react';
 
 const navigation = [
@@ -62,9 +64,20 @@ const AdminLayout: React.FC = () => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const location = useLocation();
+  const navigate = useNavigate();
+  const { logout, user } = useAuth();
 
   const handleCollapseSidebar = () => {
     setSidebarCollapsed(!sidebarCollapsed);
+  };
+
+  const handleLogout = async () => {
+    try {
+      await logout();
+      navigate('/login');
+    } catch (error) {
+      console.error('Logout failed:', error);
+    }
   };
 
   return (
@@ -160,9 +173,30 @@ const AdminLayout: React.FC = () => {
         {/* Footer */}
         {!sidebarCollapsed && (
           <div className="flex-shrink-0 border-t border-gray-200 p-4">
-            <div className="text-xs text-gray-500 text-center">
-              <p>© 2024 Hospital Admin</p>
-              <p>Version 2.0</p>
+            <div className="space-y-3">
+              {/* Logout Button */}
+              <Button
+                onClick={handleLogout}
+                variant="outline"
+                className="w-full flex items-center gap-2 text-gray-600 hover:text-gray-900 hover:bg-gray-50 border-gray-300"
+              >
+                <LogOut className="w-4 h-4" />
+                Logout
+              </Button>
+
+              {/* User Info */}
+              {user && (
+                <div className="text-xs text-gray-500 text-center">
+                  <p className="font-medium text-gray-700">{user.display_name}</p>
+                  <p className="text-gray-400">{user.email}</p>
+                </div>
+              )}
+
+              {/* Copyright */}
+              <div className="text-xs text-gray-500 text-center">
+                <p>© 2024 Hospital Admin</p>
+                <p>Version 2.0</p>
+              </div>
             </div>
           </div>
         )}

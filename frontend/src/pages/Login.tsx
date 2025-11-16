@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth"; // Our new hook
+import { useRole } from "@/hooks/useRole";
 import { Button } from "@/components/ui/button";
 import {
   Form,
@@ -35,10 +36,11 @@ const formSchema = z.object({
 
 export default function LoginPage() {
   const [error, setError] = useState("");
-  const { login } = useAuth();
+  const { login, user, loading: authLoading } = useAuth();
+  const { role, loading: roleLoading } = useRole();
   const navigate = useNavigate();
 
-  // 2. Define the form
+  // 2. Define the form (must be before any early returns)
   const form = useForm<z.infer<typeof formSchema>>({
     resolver: zodResolver(formSchema),
     defaultValues: {
@@ -46,6 +48,32 @@ export default function LoginPage() {
       password: "",
     },
   });
+
+  // Redirect if user is already logged in
+  useEffect(() => {
+    if (!authLoading && !roleLoading) {
+      if (user && role) {
+        // User is already logged in, redirect to appropriate dashboard
+        if (role === 'admin') {
+          navigate('/admin', { replace: true });
+        } else if (role === 'doctor' || role === 'nurse') {
+          navigate('/', { replace: true });
+        }
+      }
+    }
+  }, [user, role, authLoading, roleLoading, navigate]);
+
+  // Show loading while checking authentication
+  if (authLoading || roleLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-background">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-4"></div>
+          <p className="text-muted-foreground">Loading...</p>
+        </div>
+      </div>
+    );
+  }
 
   // 3. Define a submit handler
   async function onSubmit(values: z.infer<typeof formSchema>) {
