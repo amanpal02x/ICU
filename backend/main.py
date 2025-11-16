@@ -92,7 +92,10 @@ app = FastAPI(title="Hospital Management System API")
 # Add CORS middleware for WebSocket connections
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for development
+    allow_origins=[
+        "https://icu-ruby.vercel.app",
+        "http://localhost:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
