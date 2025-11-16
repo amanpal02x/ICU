@@ -94,6 +94,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://icu-ruby.vercel.app",
+        "https://icu-git-main-aman-pals-projects-57314315.vercel.app",
         "http://localhost:8080",
     ],
     allow_credentials=True,
