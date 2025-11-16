@@ -10,8 +10,8 @@ SECRET_KEY = config('SECRET_KEY', default='your-secret-key-change-in-production'
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-# Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Password hashing - using scrypt which has no length limit
+pwd_context = CryptContext(schemes=["scrypt"], deprecated="auto")
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a password against its hash"""
@@ -19,11 +19,10 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 def get_password_hash(password: str) -> str:
     """Hash a password"""
-    # Truncate password to 72 bytes max to avoid bcrypt limit
+    # Truncate password to exactly 72 bytes max to avoid bcrypt limit
     password_bytes = password.encode('utf-8')
     if len(password_bytes) > 72:
-        truncated_password = password_bytes[:72].decode('utf-8', errors='ignore')
-        password = truncated_password
+        password = password_bytes[:72].decode('utf-8', errors='ignore')
     return pwd_context.hash(password)
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
