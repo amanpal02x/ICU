@@ -53,7 +53,7 @@ const Index = () => {
 
   const { role } = useRole();
 
-  const WEBSOCKET_URL = "ws://127.0.0.1:8000/ws";
+  const WEBSOCKET_URL = import.meta.env.VITE_API_URL.replace('http://', 'ws://') + "/ws";
   const { data: wsData, error: wsError } = useWebSocket(WEBSOCKET_URL);
 
   useEffect(() => {
