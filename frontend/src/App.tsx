@@ -80,17 +80,15 @@ const App = () => (
               {/* Admin routes - only accessible by admins */}
               <Route element={<ProtectedRoute allowedRoles={['admin']} />}>
 
-                {/* New Admin Dashboard with separate pages */}
-                <Route path="/admin/*" element={<AdminLayout />}>
+                {/* New Admin Dashboard with separate pages - nested within AdminLayout */}
+                <Route path="/admin" element={<AdminLayout />}>
                   <Route index element={<DashboardHome />} />
                   <Route path="staff" element={<StaffManagement />} />
                   <Route path="patients" element={<PatientManagement />} />
                   <Route path="departments" element={<div className="p-8"><h2 className="text-2xl font-bold">Departments Coming Soon</h2></div>} />
                   <Route path="appointments" element={<div className="p-8"><h2 className="text-2xl font-bold">Appointments Coming Soon</h2></div>} />
+                  <Route path="icu-monitors" element={<ICUAdminDashboard />} />
                 </Route>
-
-                {/* ICU Monitor Dashboard - separate route */}
-                <Route path="/admin/icu-monitors" element={<ICUAdminDashboard />} />
 
                 {/* Legacy admin route for backward compatibility */}
                 <Route path="/admin-dashboard" element={<AdminDashboard />} />

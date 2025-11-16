@@ -51,8 +51,11 @@ const DashboardHome: React.FC = () => {
           <h1 className="text-5xl font-bold bg-gradient-to-r from-slate-900 via-slate-800 to-slate-700 bg-clip-text text-transparent mb-3">
             Welcome back, {user?.display_name || 'Admin'}!
           </h1>
-          <p className="text-xl text-slate-600 mb-8 font-medium">
+          <p className="text-xl text-slate-600 mb-2 font-medium">
             Managing {hospital?.name || 'your hospital'} with excellence and care
+          </p>
+          <p className="text-sm text-slate-500 bg-slate-100/50 px-3 py-1 rounded-full inline-block font-mono">
+            Hospital ID: {hospital?.id || 'Loading...'}
           </p>
 
           <div className="flex flex-wrap gap-6">
