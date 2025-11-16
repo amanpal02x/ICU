@@ -3,7 +3,6 @@ import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-
 import { RoleProvider, useRole } from "./hooks/useRole";
 import { AuthProvider, useAuth } from "./hooks/useAuth";
 import Index from "./pages/Index";
@@ -44,6 +43,8 @@ const RoleBasedRedirect = () => {
   }
 
   if (!user) {
+    // Clear localStorage to ensure clean state
+    console.log('Redirecting to login - no user found');
     return <Navigate to="/login" replace />;
   }
 
