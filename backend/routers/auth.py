@@ -15,12 +15,18 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
 async def authenticate_user(email: str, password: str):
     """Authenticate a user by email and password"""
-    user = await user_service.get_user_by_email(email)
-    if not user:
+    try:
+        user = await user_service.get_user_by_email(email)
+        if not user:
+            return False
+        if not verify_password(password, user.get("hashed_password", "")):
+            return False
+        return user
+    except Exception as e:
+        print(f"Authentication error for {email}: {e}")
+        import traceback
+        traceback.print_exc()
         return False
-    if not verify_password(password, user.get("hashed_password", "")):
-        return False
-    return user
 
 async def get_current_user(token: str = Depends(oauth2_scheme)):
     """Get current authenticated user"""
