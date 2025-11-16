@@ -89,28 +89,13 @@ AI_RISK_THRESHOLD = 70.0  # Trigger alarm if risk score is > 70%
 # ---
 app = FastAPI(title="Hospital Management System API")
 
-# CORS configuration - Environment-specific
-ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
-
-if ENVIRONMENT == "production":
-    # Production: Specific origins only
-    allow_origins = [
-        "https://icu-ruby.vercel.app",
-        "https://icu-monitor.vercel.app",  # Adding alternate if needed
-    ]
-else:
-    # Development: Allow localhost origins
-    allow_origins = [
-        "http://localhost:8080",
-        "http://localhost:5173",
-        "http://127.0.0.1:8080",
-        "http://127.0.0.1:5173",
-    ]
-
 # Add CORS middleware for WebSocket connections
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allow_origins,
+    allow_origins=[
+        "https://icu-ruby.vercel.app",
+        "http://localhost:8080",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -569,7 +554,7 @@ async def on_startup():
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000)) # Render-friendly port
+    port = int(os.environ.get("PORT", 8000)) # Render-friendly port
     disable_reload = os.environ.get("DISABLE_DEV_RELOAD", "false").lower() == "true"
 
     print(f"--- Starting Uvicorn on 0.0.0.0:{port} ---")
