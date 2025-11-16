@@ -1,4 +1,4 @@
-import { Bell, Upload, UserCircle, LogOut, Shield, User, HelpCircle } from "lucide-react";
+import { Bell, Upload, UserCircle, LogOut, Shield, User, Headphones } from "lucide-react";
 import GradientText from "./GradientText";
 import { useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
@@ -12,14 +12,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"; // Import Dropdown components
 import { Button } from "./ui/button";
-import { useState } from "react";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-} from "@/components/ui/dialog";
+
 
 interface HeaderProps {
   alarmCount?: number;
@@ -31,8 +24,6 @@ const Header = ({ alarmCount = 0, showAlarms = true }: HeaderProps) => {
   const { role } = useRole();
   const navigate = useNavigate();
   const location = useLocation();
-  const [helpDialogOpen, setHelpDialogOpen] = useState(false);
-
   const handleLogout = async () => {
     try {
       await logout();
@@ -40,12 +31,6 @@ const Header = ({ alarmCount = 0, showAlarms = true }: HeaderProps) => {
     } catch (error) {
       console.error("Failed to log out", error);
     }
-  };
-
-  const handleScheduleDemo = () => {
-    // For now, just show an alert. In a real app, this would navigate to a demo booking page or open a calendar
-    alert("Demo scheduled! Our team will contact you shortly.");
-    setHelpDialogOpen(false);
   };
 
   return (
@@ -117,11 +102,11 @@ const Header = ({ alarmCount = 0, showAlarms = true }: HeaderProps) => {
             variant="ghost"
             size="icon"
             className="h-7 w-7 sm:h-8 sm:w-8"
-            onClick={() => setHelpDialogOpen(true)}
+            onClick={() => navigate('/support')}
             aria-label="Help and Support"
             title="Help and Support"
           >
-            <HelpCircle className="h-4 w-4 sm:h-5 sm:w-5" />
+            <Headphones className="h-4 w-4 sm:h-5 sm:w-5" />
           </Button>
           {user && (
             <DropdownMenu>
@@ -177,44 +162,6 @@ const Header = ({ alarmCount = 0, showAlarms = true }: HeaderProps) => {
           </DropdownMenu>
           )}
         </div>
-
-        {/* Help Dialog */}
-        <Dialog open={helpDialogOpen} onOpenChange={setHelpDialogOpen}>
-          <DialogContent className="sm:max-w-md">
-            <DialogHeader>
-              <DialogTitle>Help & Support</DialogTitle>
-              <DialogDescription>
-                Get assistance with ICU Alarm Center or schedule a demo.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="grid gap-4 py-4">
-              <div className="space-y-2">
-                <h4 className="text-sm font-medium">Contact Information</h4>
-                <div className="text-sm text-muted-foreground space-y-1">
-                  <p><strong>Phone:</strong> +1 (555) 123-4567</p>
-                  <p><strong>Email:</strong> support@icualarmcenter.com</p>
-                  <p><strong>Hours:</strong> 24/7 Technical Support</p>
-                </div>
-              </div>
-
-              <div className="flex gap-2 pt-4">
-                <Button
-                  onClick={handleScheduleDemo}
-                  className="flex-1"
-                >
-                  Schedule Demo
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={() => setHelpDialogOpen(false)}
-                  className="flex-1"
-                >
-                  Close
-                </Button>
-              </div>
-            </div>
-          </DialogContent>
-        </Dialog>
       </div>
     </header>
   );

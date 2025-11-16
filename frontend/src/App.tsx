@@ -17,6 +17,7 @@ import ProtectedRoute from "./components/ProtectedRoute";
 import ForgotPasswordPage from "./pages/ForgotPassword";
 import VerifyEmailPage from "./pages/VerifyEmail";
 import NotFound from "./pages/NotFound";
+import Support from "./pages/Support";
 
 // New Admin Components
 import AdminLayout from "./components/admin/AdminLayout";
@@ -96,9 +97,10 @@ const App = () => (
 
               </Route>
 
-              {/* Profile route - accessible by all authenticated users */}
+              {/* Profile and Support routes - accessible by all authenticated users */}
               <Route element={<ProtectedRoute allowedRoles={['admin', 'doctor', 'nurse']} />}>
                 <Route path="/profile" element={<Profile />} />
+                <Route path="/support" element={<Support />} />
               </Route>
 
               {/* Doctor/Nurse dashboard routes */}
