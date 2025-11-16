@@ -95,12 +95,48 @@ app.add_middleware(
     allow_origins=[
         "https://icu-ruby.vercel.app",
         "https://icu-git-main-aman-pals-projects-57314315.vercel.app",
+        "https://icu-1-r21u.onrender.com",
         "http://localhost:8080",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.get("/")
+async def root():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "message": "ICU Monitor API is running",
+        "version": "1.0.0"
+    }
+
+@app.get("/health")
+async def health_check():
+    """Detailed health check endpoint"""
+    return {
+        "status": "healthy",
+        "message": "ICU Monitor API is running",
+        "version": "1.0.0",
+        "timestamp": _now_iso(),
+        "cors_origins": [
+            "https://icu-ruby.vercel.app",
+            "https://icu-git-main-aman-pals-projects-57314315.vercel.app",
+            "https://icu-1-r21u.onrender.com",
+            "http://localhost:8080",
+        ]
+    }
+
+# Add request logging middleware
+@app.middleware("http")
+async def log_requests(request, call_next):
+    """Log all incoming requests for debugging"""
+    print(f"[DEBUG] {request.method} {request.url.path} from {request.client.host}")
+    response = await call_next(request)
+    if response.status_code >= 400:
+        print(f"[ERROR] {response.status_code} for {request.method} {request.url.path}")
+    return response
 
 # Include API routers
 app.include_router(auth.router)  # Re-enabling auth router
