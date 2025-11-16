@@ -89,14 +89,28 @@ AI_RISK_THRESHOLD = 70.0  # Trigger alarm if risk score is > 70%
 # ---
 app = FastAPI(title="Hospital Management System API")
 
+# CORS configuration - Environment-specific
+ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
+
+if ENVIRONMENT == "production":
+    # Production: Specific origins only
+    allow_origins = [
+        "https://icu-ruby.vercel.app",
+        "https://icu-monitor.vercel.app",  # Adding alternate if needed
+    ]
+else:
+    # Development: Allow localhost origins
+    allow_origins = [
+        "http://localhost:8080",
+        "http://localhost:5173",
+        "http://127.0.0.1:8080",
+        "http://127.0.0.1:5173",
+    ]
+
 # Add CORS middleware for WebSocket connections
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "*",  # Allow all origins in production (will be restricted by environment later)
-        "http://localhost:8080",
-        "http://localhost:5173",
-    ],
+    allow_origins=allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
