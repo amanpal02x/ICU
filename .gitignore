@@ -4,3 +4,9 @@ frontend/node_modules/.cache/
 
 .env.*
 .env
+
+# Terraform state files
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
