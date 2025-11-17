@@ -10,3 +10,12 @@ frontend/node_modules/.cache/
 *.tfstate.*
 *.tfvars
 *.tfvars.json
+# ignore terraform local directories & provider binaries
+**/.terraform/*
+.terraform/
+
+# ignore terraform local directories & provider binaries
+**/.terraform/*
+terraform/.terraform/
+.terraform/
+
