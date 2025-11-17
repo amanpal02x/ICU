@@ -6,7 +6,7 @@ from datetime import timedelta
 from models import UserCreate, UserLogin, Token, User, HospitalCreate
 import user_service
 import hospital_service
-from auth_utils import create_access_token, get_password_hash, verify_password
+from auth_utils import create_access_token, get_password_hash, verify_password, set_auth_bypass, AUTH_BYPASS_ENABLED
 from models import TokenData
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
@@ -30,6 +30,20 @@ async def authenticate_user(email: str, password: str):
 
 async def get_current_user(token: str = Depends(oauth2_scheme)):
     """Get current authenticated user"""
+    # AUTH BYPASS: Return dummy doctor user if bypass is enabled
+    if AUTH_BYPASS_ENABLED:
+        print("🔓 AUTH BYPASS: Returning dummy doctor user")
+        return {
+            "firebase_uid": "bypass-doctor-123",
+            "email": "doctor@bypass.com",
+            "display_name": "Bypass Doctor",
+            "role": "doctor",
+            "hospital_id": "bypass-hospital",
+            "department_id": None,
+            "phone": "123-456-7890",
+            "is_active": True
+        }
+
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -173,3 +187,20 @@ async def read_users_me(current_user: Dict[str, Any] = Depends(get_current_activ
         "phone": current_user.get("phone"),
         "is_active": current_user["is_active"]
     }
+
+@router.post("/bypass/enable")
+async def enable_auth_bypass():
+    """Enable authentication bypass (DEV ONLY)"""
+    set_auth_bypass(True)
+    return {"message": "🔓 Authentication bypass ENABLED", "status": "enabled"}
+
+@router.post("/bypass/disable")
+async def disable_auth_bypass():
+    """Disable authentication bypass"""
+    set_auth_bypass(False)
+    return {"message": "🔒 Authentication bypass DISABLED", "status": "disabled"}
+
+@router.get("/bypass/status")
+async def get_auth_bypass_status():
+    """Get current auth bypass status"""
+    return {"auth_bypass_enabled": AUTH_BYPASS_ENABLED}

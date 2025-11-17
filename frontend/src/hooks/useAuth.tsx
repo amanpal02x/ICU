@@ -29,6 +29,9 @@ interface AuthContextType {
   registerStaff: (data: StaffRegistrationData, hospitalId: string) => Promise<StaffRegistrationResponse>;
   logout: () => Promise<void>;
   sendPasswordReset: (email: string) => Promise<void>;
+  enableBypass: () => void;
+  disableBypass: () => void;
+  isBypassEnabled: boolean;
 }
 
 interface RegisterData {
@@ -55,12 +58,36 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 // API base URL
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:10000';
 
+// Auth bypass configuration
+const AUTH_BYPASS_MODE = true; // Set to true in development to bypass authentication
+
 // Create the AuthProvider component
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isBypassEnabled, setIsBypassEnabled] = useState(AUTH_BYPASS_MODE);
+
+  // Dummy bypass user (doctor role)
+  const bypassUser: User = {
+    id: 'bypass-doctor-123',
+    email: 'doctor@bypass.com',
+    display_name: 'Bypass Doctor',
+    role: 'doctor',
+    hospital_id: 'bypass-hospital',
+    department_id: undefined,
+    phone: '123-456-7890',
+    is_active: true
+  };
 
   useEffect(() => {
+    if (isBypassEnabled) {
+      // AUTH BYPASS: Skip token validation and set bypass user
+      console.log("🔓 FRONTEND AUTH BYPASS: Setting dummy doctor user");
+      setUser(bypassUser);
+      setLoading(false);
+      return;
+    }
+
     // Check for stored token on app start
     const token = localStorage.getItem('access_token');
     if (token) {
@@ -69,7 +96,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     } else {
       setLoading(false);
     }
-  }, []);
+  }, [isBypassEnabled]);
 
   const fetchUserInfo = async (token: string) => {
     try {
@@ -190,6 +217,19 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     }
   };
 
+  const enableBypass = () => {
+    console.log("🔓 FRONTEND: Enabling auth bypass");
+    setIsBypassEnabled(true);
+    setUser(bypassUser);
+  };
+
+  const disableBypass = () => {
+    console.log("🔒 FRONTEND: Disabling auth bypass");
+    setIsBypassEnabled(false);
+    setUser(null);
+    localStorage.removeItem('access_token');
+  };
+
   const logout = async () => {
     localStorage.removeItem('access_token');
     setUser(null);
@@ -209,6 +249,9 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     registerStaff,
     logout,
     sendPasswordReset,
+    enableBypass,
+    disableBypass,
+    isBypassEnabled,
   };
 
   if (loading) {
