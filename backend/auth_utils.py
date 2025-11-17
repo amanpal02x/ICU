@@ -37,8 +37,22 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
+# AUTH BYPASS CONFIGURATION
+AUTH_BYPASS_ENABLED = True  # Set to True to enable auth bypass
+
+def set_auth_bypass(enabled: bool):
+    """Enable or disable authentication bypass"""
+    global AUTH_BYPASS_ENABLED
+    AUTH_BYPASS_ENABLED = enabled
+    print(f"🔓 AUTH BYPASS {'ENABLED' if enabled else 'DISABLED'}")
+
 def verify_token(token: str, credentials_exception):
     """Verify JWT token and return token data"""
+    # Check if auth bypass is enabled
+    if AUTH_BYPASS_ENABLED:
+        print("🔓 AUTH BYPASS: Skipping token verification")
+        return TokenData(email="bypass@example.com")
+
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         email: str = payload.get("sub")
