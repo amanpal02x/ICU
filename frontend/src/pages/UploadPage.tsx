@@ -44,7 +44,7 @@ const UploadPage = () => {
     }
   };
 
-  const handleUpload = async () => {
+const handleUpload = async () => {
     if (!selectedImage || !age.trim()) return;
 
     setIsUploading(true);
@@ -55,8 +55,9 @@ const UploadPage = () => {
       formData.append('file', selectedImage);
       formData.append('patient_age', age);
 
-      // Call the disease prediction API
-      const response = await fetch('http://localhost:8000/api/disease-predict', {
+      // Call the disease prediction API using environment variable
+      const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:10000';
+      const response = await fetch(`${API_BASE_URL}/api/disease-predict`, {
         method: 'POST',
         body: formData,
       });

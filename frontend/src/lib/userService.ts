@@ -1,6 +1,6 @@
 import { UserRole } from "@/hooks/useRole";
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:10000';
 
 export interface UserProfile {
   id: string;
