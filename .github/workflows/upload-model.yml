@@ -22,6 +22,11 @@ jobs:
           role-to-assume: arn:aws:iam::601559288497:role/GitHubActionsTerraformRole
           aws-region: us-east-2
 
+      - name: Debug AWS Identity
+        run: |
+          echo "Checking assumed role..."
+          aws sts get-caller-identity
+
       - name: Upload model to S3
         run: |
           aws s3 cp backend/model.pkl s3://icu-model
