@@ -170,8 +170,8 @@ apt install -y python3 python3-pip python3-venv git awscli
 
 # Clone your repo
 mkdir -p /opt/app
-git clone https://github.com/amanpal02x/ICU /opt/app
-cd /opt/app/backend
+git clone https://github.com/amanpal02x/ICU.git /opt/app/ICU
+cd /opt/app/ICU/backend
 
 # Install Python dependencies
 pip3 install -r requirements.txt
@@ -179,11 +179,13 @@ pip3 install -r requirements.txt
 # Install FastAPI server tools
 pip3 install uvicorn gunicorn
 
-# Download ML model from S3
+# Create model folder
 mkdir -p /opt/app/model
+
+# Download ML model from S3
 aws s3 cp s3://${aws_s3_bucket.model_bucket.bucket}/model.pkl /opt/app/model/model.pkl --region ${var.aws_region}
 
-# Export environment variables
+# Export environment variable
 echo "export MONGO_URI=${var.mongodb_uri}" >> /etc/profile
 
 # Create systemd service
@@ -194,7 +196,7 @@ After=network.target
 
 [Service]
 User=root
-WorkingDirectory=/opt/app/backend
+WorkingDirectory=/opt/app/ICU/backend
 Environment="MONGO_URI=${var.mongodb_uri}"
 ExecStart=/usr/bin/uvicorn main:app --host 0.0.0.0 --port 8000
 Restart=always
@@ -310,5 +312,76 @@ resource "aws_key_pair" "generated_key" {
 resource "local_file" "private_key_pem" {
   content  = tls_private_key.ec2_private_key.private_key_pem
   filename = "${path.module}/icu-ec2-key.pem"
+}
+
+
+###########################################
+# OIDC provider for GitHub Actions
+###########################################
+
+resource "aws_iam_openid_connect_provider" "github" {
+  url = "https://token.actions.githubusercontent.com"
+
+  client_id_list = ["sts.amazonaws.com"]
+
+  thumbprint_list = [
+    "6938fd4d98bab03faadb97b34396831e3780aea1" # GitHub’s OIDC thumbprint
+  ]
+}
+
+###########################################
+# IAM Role for GitHub Actions to assume
+###########################################
+
+resource "aws_iam_role" "github_actions_role" {
+  name = "GitHubActionsTerraformRole"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Principal = {
+          Federated = aws_iam_openid_connect_provider.github.arn
+        },
+        Action = "sts:AssumeRoleWithWebIdentity",
+        Condition = {
+          StringEquals = {
+            "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+          },
+          StringLike = {
+            "token.actions.githubusercontent.com:sub" = "repo:amanpal02x/ICU:ref:refs/heads/main"
+          }
+        }
+      }
+    ]
+  })
+}
+
+###########################################
+# S3 Permissions for the GitHub Actions role
+###########################################
+
+resource "aws_iam_role_policy" "github_s3_policy" {
+  name = "GitHubActionsS3Policy"
+  role = aws_iam_role.github_actions_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = [
+          "s3:PutObject",
+          "s3:GetObject",
+          "s3:ListBucket"
+        ],
+        Resource = [
+          aws_s3_bucket.model_bucket.arn,
+          "${aws_s3_bucket.model_bucket.arn}/*"
+        ]
+      }
+    ]
+  })
 }
 
