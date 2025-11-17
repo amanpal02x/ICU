@@ -20,7 +20,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v3
         with:
           role-to-assume: arn:aws:iam::601559288497:role/GitHubActionsTerraformRole
-          aws-region: ap-south-1
+          aws-region: us-east-2
 
       - name: Upload model to S3
         run: |
