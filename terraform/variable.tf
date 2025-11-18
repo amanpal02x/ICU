@@ -27,3 +27,8 @@ variable "aws_region" {
   default = "us-east-2"
 }
 
+variable "certificate_arn" {
+  description = "ACM certificate ARN to use for ALB HTTPS. Leave empty until you have a cert."
+  type        = string
+  default     = ""
+}
