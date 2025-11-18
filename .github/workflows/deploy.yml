@@ -24,33 +24,17 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Send SSM command to pull latest code & restart service
-        env:
-          REPO_URL: ${{ secrets.GIT_REPO }}
-          PROJECT_NAME: ${{ secrets.PROJECT_NAME }}
-        run: |
-          INSTANCE_ID=$(aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=${PROJECT_NAME}-ec2" \
-            --query "Reservations[].Instances[].InstanceId" --output text)
-
-          if [ -z "$INSTANCE_ID" ]; then
-            echo "No instance found with tag ${PROJECT_NAME}-ec2"
-            exit 1
-          fi
-
-          echo "InstanceID: $INSTANCE_ID"
-
-                - name: Send SSM command to deploy backend & start service
+      - name: Send SSM command to deploy backend & start service
         id: deploy_ssm
         env:
           REPO_URL: ${{ secrets.GIT_REPO }}
           INSTANCE_TAG: ${{ secrets.PROJECT_NAME }}-ec2
-          S3_BUCKET: ${{ secrets.S3_BUCKET }}        # optional, add this secret if you use S3 for models
-          MONGODB_URI: ${{ secrets.MONGODB_URI }}    # optional, if you store DB URI in GH secrets for quick test
-          UVICORN_MODULE: ${{ secrets.UVICORN_APP_MODULE }} # e.g., main:app
-          UVICORN_WORKERS: ${{ secrets.UVICORN_WORKERS }}   # e.g., 1
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          UVICORN_MODULE: ${{ secrets.UVICORN_APP_MODULE }}
+          UVICORN_WORKERS: ${{ secrets.UVICORN_WORKERS }}
           REGION: ${{ secrets.AWS_REGION }}
-         run: |
+        run: |
           set -euo pipefail
 
           echo "Finding instance id by tag ${INSTANCE_TAG}..."
