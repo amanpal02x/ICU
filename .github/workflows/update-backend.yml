@@ -101,24 +101,24 @@ jobs:
           echo "Instance found: $INSTANCE_ID"
 
           UPDATE_COMMAND=$(cat <<'EOF'
-#!/bin/bash
-set -euo pipefail
-echo "--- Starting Code Pull, Requirements Update, and Service Restart ---"
-cd /opt/app/ICU || { echo "App directory not found"; exit 1; }
-sudo -u ubuntu git pull
-sudo -u ubuntu /opt/app/ICU/venv/bin/pip install -r /opt/app/ICU/backend/requirements.txt
-systemctl daemon-reload
-systemctl restart fastapi
-echo "--- Service Restart Triggered ---"
-EOF
-)
+                      #!/bin/bash
+                      set -euo pipefail
+                      echo "--- Starting Code Pull, Requirements Update, and Service Restart ---"
+                      cd /opt/app/ICU || { echo "App directory not found"; exit 1; }
+                      sudo -u ubuntu git pull
+                      sudo -u ubuntu /opt/app/ICU/venv/bin/pip install -r /opt/app/ICU/backend/requirements.txt
+                      systemctl daemon-reload
+                      systemctl restart fastapi
+                      echo "--- Service Restart Triggered ---"
+                      EOF
+                      )
 
-          CMD_ID=$(aws ssm send-command \
-            --instance-ids "$INSTANCE_ID" \
-            --document-name "AWS-RunShellScript" \
-            --comment "Update backend via SSM" \
-            --parameters commands="$UPDATE_COMMAND" \
-            --output text \
-            --region "$AWS_REGION")
+                                CMD_ID=$(aws ssm send-command \
+                                  --instance-ids "$INSTANCE_ID" \
+                                  --document-name "AWS-RunShellScript" \
+                                  --comment "Update backend via SSM" \
+                                  --parameters commands="$UPDATE_COMMAND" \
+                                  --output text \
+                                  --region "$AWS_REGION")
 
-          echo "SSM Command ID: $CMD_ID"
+                                echo "SSM Command ID: $CMD_ID"
