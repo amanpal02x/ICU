@@ -164,52 +164,76 @@ resource "aws_instance" "backend" {
 
   user_data = <<-EOF
 #!/bin/bash
+set -e
+# basic packages
+apt-get update -y
+DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-pip git awscli
 
-apt update -y
-apt install -y python3 python3-pip python3-venv git awscli
-
-# Clone your repo
+# app dirs
 mkdir -p /opt/app
-git clone https://github.com/amanpal02x/ICU.git /opt/app/ICU
-cd /opt/app/ICU/backend
+chown -R ubuntu:ubuntu /opt/app
+cd /opt/app
 
-# Install Python dependencies
-pip3 install -r requirements.txt
+# clone repo (idempotent)
+if [ ! -d /opt/app/ICU ]; then
+  sudo -u ubuntu git clone https://github.com/amanpal02x/ICU.git /opt/app/ICU
+else
+  cd /opt/app/ICU
+  sudo -u ubuntu git pull || true
+fi
 
-# Install FastAPI server tools
-pip3 install uvicorn gunicorn
+cd /opt/app/ICU
 
-# Create model folder
-mkdir -p /opt/app/model
+# create venv and install requirements as ubuntu user
+sudo -u ubuntu python3 -m venv venv
+sudo -u ubuntu /opt/app/ICU/venv/bin/python -m pip install --upgrade pip
+sudo -u ubuntu /opt/app/ICU/venv/bin/pip install -r backend/requirements.txt
+sudo -u ubuntu /opt/app/ICU/venv/bin/pip install uvicorn
 
-# Download ML model from S3
-aws s3 cp s3://${aws_s3_bucket.model_bucket.bucket}/model.pkl /opt/app/model/model.pkl --region ${var.aws_region}
+# Ensure backend/models directory exists
+sudo -u ubuntu mkdir -p /opt/app/ICU/backend/models
 
-# Export environment variable
-echo "export MONGO_URI=${var.mongodb_uri}" >> /etc/profile
+# Download expected model filename from S3 into backend/models/
+# NOTE: update S3 path if your object key differs
+aws s3 cp s3://${aws_s3_bucket.model_bucket.bucket}/vitals_model_tuned.joblib /opt/app/ICU/backend/models/vitals_model_tuned.joblib --region ${var.aws_region} || true
 
-# Create systemd service
+# Create .env file for environment variables (if not present)
+cat > /opt/app/ICU/.env <<EOL
+PORT=8000
+DISABLE_DEV_RELOAD=true
+USE_REAL_MONITOR_DATA=false
+MONGO_URI="${var.mongodb_uri}"
+EOL
+chown ubuntu:ubuntu /opt/app/ICU/.env
+chmod 600 /opt/app/ICU/.env
+
+# Create systemd service that uses the venv python
 cat <<EOT > /etc/systemd/system/fastapi.service
 [Unit]
-Description=FastAPI Service
+Description=ICU FastAPI (uvicorn) service
 After=network.target
 
 [Service]
-User=root
+User=ubuntu
+Group=ubuntu
 WorkingDirectory=/opt/app/ICU/backend
-Environment="MONGO_URI=${var.mongodb_uri}"
-ExecStart=/usr/bin/uvicorn main:app --host 0.0.0.0 --port 8000
-Restart=always
+EnvironmentFile=/opt/app/ICU/.env
+ExecStart=/opt/app/ICU/venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
 EOT
 
-# Start service
+# reload and start service
 systemctl daemon-reload
 systemctl enable fastapi
-systemctl start fastapi
+systemctl restart fastapi || (journalctl -u fastapi -n 200; exit 1)
 EOF
+
 }
 
 
@@ -228,6 +252,27 @@ resource "aws_lb_target_group" "tg" {
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
   target_type = "instance"
+
+  health_check {
+    enabled             = true
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+    timeout             = 5
+    interval            = 30
+    path                = "/health"
+    matcher             = "200-399"
+  }
+}
+
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.app_lb.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.tg.arn
+  }
 }
 
 # resource "aws_lb_listener" "http" {
