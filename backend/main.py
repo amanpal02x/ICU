@@ -95,6 +95,7 @@ app.add_middleware(
     allow_origins=[
         "https://icu-ruby.vercel.app",
         "https://icu-git-main-aman-pals-projects-57314315.vercel.app",
+        "https://xpvmw0sxz2.execute-api.us-east-2.amazonaws.com",
         "https://main.d1wagczisbb966.amplifyapp.com",
         "https://icu-1-r21u.onrender.com",
         "http://localhost:8080",
@@ -126,6 +127,7 @@ async def health_check():
             "https://icu-git-main-aman-pals-projects-57314315.vercel.app",
             "https://icu-1-r21u.onrender.com",
             "https://main.d1wagczisbb966.amplifyapp.com",
+            "https://xpvmw0sxz2.execute-api.us-east-2.amazonaws.com",
             "http://localhost:8080",
         ]
     }
