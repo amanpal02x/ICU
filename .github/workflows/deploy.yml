@@ -40,9 +40,153 @@ jobs:
 
           echo "InstanceID: $INSTANCE_ID"
 
-          aws ssm send-command \
+                - name: Send SSM command to deploy backend & start service
+        id: deploy_ssm
+        env:
+          REPO_URL: ${{ secrets.GIT_REPO }}
+          INSTANCE_TAG: ${{ secrets.PROJECT_NAME }}-ec2
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}        # optional, add this secret if you use S3 for models
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}    # optional, if you store DB URI in GH secrets for quick test
+          UVICORN_MODULE: ${{ secrets.UVICORN_APP_MODULE }} # e.g., main:app
+          UVICORN_WORKERS: ${{ secrets.UVICORN_WORKERS }}   # e.g., 1
+          REGION: ${{ secrets.AWS_REGION }}
+         run: |
+          set -euo pipefail
+
+          echo "Finding instance id by tag ${INSTANCE_TAG}..."
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=${INSTANCE_TAG}" \
+            --query "Reservations[].Instances[].InstanceId" --output text --region ${REGION})
+          echo "InstanceID: $INSTANCE_ID"
+
+          if [ -z "$INSTANCE_ID" ]; then
+            echo "No instance found with tag ${INSTANCE_TAG}"
+            exit 1
+          fi
+
+          # Build the multi-line command to run on the instance
+          read -r -d '' SSM_SCRIPT <<'EOF'
+           #!/bin/bash
+           set -e
+            export DEBIAN_FRONTEND=noninteractive
+
+            # variables that can be present as environment values from SSM call
+            REPO_URL="{{REPO_URL}}"
+            S3_BUCKET="{{S3_BUCKET}}"
+            MONGODB_URI="{{MONGODB_URI}}"
+            UVICORN_MODULE="{{UVICORN_MODULE}}"
+            UVICORN_WORKERS="{{UVICORN_WORKERS}}"
+
+            # ensure system packages
+            which git || apt-get update -y && apt-get install -y git python3 python3-venv python3-pip build-essential awscli curl || true
+
+            # ensure app user exists
+            id -u appuser >/dev/null 2>&1 || useradd -m -s /bin/bash appuser
+
+            # clone or update app
+            sudo -u appuser bash -lc '
+              set -e
+              cd /home/appuser
+              if [ ! -d app ]; then
+                git clone --depth 1 '"'"'${REPO_URL}'"'"' app || true
+              else
+                cd app
+                git fetch --all --prune || true
+                git reset --hard origin/main || true
+              fi
+            '
+
+            # setup virtualenv and install requirements
+            sudo -u appuser bash -lc '
+              cd /home/appuser/app
+              python3 -m venv venv || true
+              source venv/bin/activate
+              pip install --upgrade pip
+              if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+            '
+
+            # create models dir and download model from S3 (if S3_BUCKET provided)
+            if [ -n "${S3_BUCKET}" ] && [ "${S3_BUCKET}" != "null" ]; then
+              sudo -u appuser mkdir -p /home/appuser/app/models
+              # example: download object "models/latest_model.pkl" - adjust path as needed
+              aws s3 cp "s3://${S3_BUCKET}/models/latest_model.pkl" /home/appuser/app/models/latest_model.pkl || echo "model not found in S3 (continuing)"
+            fi
+
+            # create/update systemd service file (so service is always run)
+            cat > /etc/systemd/system/fastapi-app.service <<SERVICE
+            [Unit]
+            Description=FastAPI App (uvicorn) service
+            After=network.target
+
+            [Service]
+            Type=simple
+            User=appuser
+            WorkingDirectory=/home/appuser/app
+            Environment="MONGODB_URI=${MONGODB_URI}"
+            Environment="S3_BUCKET=${S3_BUCKET}"
+            ExecStart=/bin/bash -lc 'source /home/appuser/app/venv/bin/activate && exec uvicorn ${UVICORN_MODULE} --host 0.0.0.0 --port 8000 --workers ${UVICORN_WORKERS}'
+            Restart=always
+            RestartSec=5
+            LimitNOFILE=65536
+
+            [Install]
+            WantedBy=multi-user.target
+            SERVICE
+
+            # reload systemd and restart
+            systemctl daemon-reload
+            systemctl enable fastapi-app
+            systemctl restart fastapi-app || (journalctl -u fastapi-app -n 100 --no-pager; exit 1)
+
+            # wait for health endpoint
+            echo "Waiting for the app to answer on http://127.0.0.1:8000/health ..."
+            TRIES=20
+            for i in $(seq 1 $TRIES); do
+              sleep 2
+              if curl -sSf http://127.0.0.1:8000/health >/dev/null 2>&1; then
+                echo "Health check passed"
+                exit 0
+              fi
+              echo "Health check try $i failed..."
+            done
+
+            echo "Health check failed — printing journalctl logs for fastapi-app"
+            journalctl -u fastapi-app -n 200 --no-pager || true
+            exit 1
+            EOF
+
+          # replace placeholders with actual env values (escape properly)
+          SSM_SCRIPT="${SSM_SCRIPT//\{\{REPO_URL\}\}/${REPO_URL}}"
+          SSM_SCRIPT="${SSM_SCRIPT//\{\{S3_BUCKET\}\}/${S3_BUCKET:-}}"
+          SSM_SCRIPT="${SSM_SCRIPT//\{\{MONGODB_URI\}\}/${MONGODB_URI:-}}"
+          SSM_SCRIPT="${SSM_SCRIPT//\{\{UVICORN_MODULE\}\}/${UVICORN_MODULE:-main:app}}"
+          SSM_SCRIPT="${SSM_SCRIPT//\{\{UVICORN_WORKERS\}\}/${UVICORN_WORKERS:-1}}"
+
+          echo "Sending SSM command..."
+          COMMAND_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
             --comment "Deploy backend from GitHub" \
-            --parameters commands="cd /home/appuser/app || git clone --depth 1 ${REPO_URL} /home/appuser/app ; cd /home/appuser/app ; git fetch --all ; git reset --hard origin/main ; python3 -m venv venv || true ; source venv/bin/activate ; pip install -r requirements.txt ; systemctl restart fastapi-app" \
-            --output text
+            --parameters commands="$SSM_SCRIPT" \
+            --query "Command.CommandId" --output text --region ${REGION})
+
+          echo "Sent CommandId: $COMMAND_ID"
+
+          # wait for result
+          echo "Waiting for SSM invocation result..."
+          for i in $(seq 1 30); do
+            STATUS=$(aws ssm get-command-invocation --instance-id "$INSTANCE_ID" --command-id "$COMMAND_ID" --query "Status" --output text --region ${REGION} 2>/dev/null || true)
+            echo "Try $i: status=$STATUS"
+            if [ "$STATUS" = "Success" ]; then
+              echo "SSM command succeeded"
+              exit 0
+            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "TimedOut" ] || [ "$STATUS" = "Cancelled" ]; then
+              echo "SSM command ended with status $STATUS"
+              aws ssm get-command-invocation --instance-id "$INSTANCE_ID" --command-id "$COMMAND_ID" --region ${REGION} --query "{Status:Status,Stdout:StandardOutputContent,Stderr:StandardErrorContent}" --output json || true
+              exit 1
+            fi
+            sleep 5
+          done
+
+          echo "SSM command did not finish within timeout"
+          exit 1
