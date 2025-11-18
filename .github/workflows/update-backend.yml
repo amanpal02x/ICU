@@ -8,7 +8,7 @@ on:
       - "backend/**"
       - "backend/requirements.txt" # Optimization: usually handled by git pull
       - "backend/models/**"
-      - "update-backend.yml"
+      - ".github/workflows/update-backend.yml"
 
 permissions:
   id-token: write
