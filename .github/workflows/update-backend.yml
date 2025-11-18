@@ -19,7 +19,7 @@ env:
   AWS_REGION: us-east-2
   EC2_INSTANCE_TAG: icu-backend
   # NOTE: set this repo secret MODEL_S3_BUCKET_NAME to the bucket created by Terraform.
-  # If the secret is not set, the job will fall back to 'icu-models' at runtime.
+  # GitHub will populate env.S3_BUCKET_NAME with the secret value (or empty if secret missing).
   S3_BUCKET_NAME: ${{ secrets.MODEL_S3_BUCKET_NAME }}
   APP_DIR: /opt/app/ICU
   BACKEND_SERVICE: fastapi
@@ -50,10 +50,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Use secret if set, otherwise fallback to 'icu-models'
-          S3_BUCKET_NAME="${S3_BUCKET_NAME:-}"
-          # The GitHub expression above populated env.S3_BUCKET_NAME with the secret (or empty).
-          : "${S3_BUCKET_NAME:=${{ env.S3_BUCKET_NAME || 'icu-models' }}}"
+          # Use the env value (populated by GitHub from the secret). If empty, fallback to 'icu-models'
+          : "${S3_BUCKET_NAME:=icu-models}"
 
           echo "Using S3_BUCKET_NAME=$S3_BUCKET_NAME"
           echo "Caller identity:"
@@ -71,8 +69,7 @@ jobs:
       - name: Upload model directory to S3
         run: |
           set -euo pipefail
-          # ensure local fallback if secret not set
-          S3_BUCKET_NAME="${S3_BUCKET_NAME:-icu-models}"
+          : "${S3_BUCKET_NAME:=icu-models}"
           echo "Uploading backend/models -> s3://$S3_BUCKET_NAME/models/ (region: $AWS_REGION)"
           aws s3 cp backend/models/ s3://"$S3_BUCKET_NAME"/models/ --recursive --region "$AWS_REGION"
           echo "Model upload complete."
@@ -80,9 +77,7 @@ jobs:
       - name: Update EC2 Backend via SSM
         run: |
           set -euo pipefail
-
-          # ensure local fallback if secret not set
-          S3_BUCKET_NAME="${S3_BUCKET_NAME:-icu-models}"
+          : "${S3_BUCKET_NAME:=icu-models}"
 
           echo "Finding running EC2 instance by tag: ${EC2_INSTANCE_TAG}"
 
@@ -100,25 +95,15 @@ jobs:
 
           echo "Instance found: $INSTANCE_ID"
 
-          UPDATE_COMMAND=$(cat <<'EOF'
-                      #!/bin/bash
-                      set -euo pipefail
-                      echo "--- Starting Code Pull, Requirements Update, and Service Restart ---"
-                      cd /opt/app/ICU || { echo "App directory not found"; exit 1; }
-                      sudo -u ubuntu git pull
-                      sudo -u ubuntu /opt/app/ICU/venv/bin/pip install -r /opt/app/ICU/backend/requirements.txt
-                      systemctl daemon-reload
-                      systemctl restart fastapi
-                      echo "--- Service Restart Triggered ---"
-                      EOF
-                      )
+          # Single-line script to run on the instance via SSM. No heredoc, no multiline YAML embedded.
+          SSMSCRIPT="bash -lc 'set -euo pipefail; cd /opt/app/ICU || { echo \"App directory not found\"; exit 1; }; sudo -u ubuntu git pull; sudo -u ubuntu /opt/app/ICU/venv/bin/pip install -r /opt/app/ICU/backend/requirements.txt; systemctl daemon-reload; systemctl restart fastapi'"
 
-                                CMD_ID=$(aws ssm send-command \
-                                  --instance-ids "$INSTANCE_ID" \
-                                  --document-name "AWS-RunShellScript" \
-                                  --comment "Update backend via SSM" \
-                                  --parameters commands="$UPDATE_COMMAND" \
-                                  --output text \
-                                  --region "$AWS_REGION")
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Update backend via SSM" \
+            --parameters commands="$SSMSCRIPT" \
+            --output text \
+            --region "$AWS_REGION")
 
-                                echo "SSM Command ID: $CMD_ID"
+          echo "SSM Command ID: $CMD_ID"
