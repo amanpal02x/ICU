@@ -1,0 +1,48 @@
+name: Deploy Backend to EC2 (via SSM using OIDC)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC (assume role)
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Send SSM command to pull latest code & restart service
+        env:
+          REPO_URL: ${{ secrets.GIT_REPO }}
+          PROJECT_NAME: ${{ secrets.PROJECT_NAME }}
+        run: |
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=${PROJECT_NAME}-ec2" \
+            --query "Reservations[].Instances[].InstanceId" --output text)
+
+          if [ -z "$INSTANCE_ID" ]; then
+            echo "No instance found with tag ${PROJECT_NAME}-ec2"
+            exit 1
+          fi
+
+          echo "InstanceID: $INSTANCE_ID"
+
+          aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy backend from GitHub" \
+            --parameters commands="cd /home/appuser/app || git clone --depth 1 ${REPO_URL} /home/appuser/app ; cd /home/appuser/app ; git fetch --all ; git reset --hard origin/main ; python3 -m venv venv || true ; source venv/bin/activate ; pip install -r requirements.txt ; systemctl restart fastapi-app" \
+            --output text
