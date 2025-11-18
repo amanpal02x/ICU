@@ -95,18 +95,18 @@ jobs:
 
       # put any steps that require the running backend here (tests, integration, etc.)
 
-      - name: Stop backend (cleanup)
-        if: always()
-        run: |
-          if [ -f backend.pid ]; then
-            echo "Stopping backend (pid=$(cat backend.pid))"
-            kill -TERM "$(cat backend.pid)" || true
-            sleep 1
-            rm -f backend.pid
-          else
-            echo "No backend.pid found; trying best-effort pkill"
-            pkill -f "uvicorn backend.main:app" || true
-            pkill -f "python backend/main.py" || true
-          fi
-          echo "=== final backend.log (tail) ==="
-          tail -n 200 backend.log || true
+      # - name: Stop backend (cleanup)
+      #   if: always()
+      #   run: |
+      #     if [ -f backend.pid ]; then
+      #       echo "Stopping backend (pid=$(cat backend.pid))"
+      #       kill -TERM "$(cat backend.pid)" || true
+      #       sleep 1
+      #       rm -f backend.pid
+      #     else
+      #       echo "No backend.pid found; trying best-effort pkill"
+      #       pkill -f "uvicorn backend.main:app" || true
+      #       pkill -f "python backend/main.py" || true
+      #     fi
+      #     echo "=== final backend.log (tail) ==="
+      #     tail -n 200 backend.log || true
