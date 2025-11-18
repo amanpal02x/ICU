@@ -152,7 +152,6 @@ resource "aws_s3_bucket" "model_bucket" {
 }
 
 # EC2 INSTANCE (FASTAPI BACKEND)
-
 resource "aws_instance" "backend" {
   ami                         = var.ami_id
   instance_type               = "c7i-flex.large"
@@ -164,51 +163,70 @@ resource "aws_instance" "backend" {
 
   user_data = <<-EOF
 #!/bin/bash
-set -e
-# basic packages
-apt-get update -y
-DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-pip git awscli
+set -euo pipefail
 
-# app dirs
+# change to app dir
+APP_DIR=/opt/app/ICU
+BACKEND_DIR="$APP_DIR/backend"
+VENV_DIR="$APP_DIR/venv"
+MODEL_S3_BUCKET="${aws_s3_bucket.model_bucket.bucket}"
+MODEL_KEY="vitals_model_tuned.joblib"
+MODEL_LOCAL="$BACKEND_DIR/models/$MODEL_KEY"
+ENV_FILE="$APP_DIR/.env"
+
+echo ">>> ensure app directory exists and correct owner"
 mkdir -p /opt/app
 chown -R ubuntu:ubuntu /opt/app
-cd /opt/app
 
-# clone repo (idempotent)
-if [ ! -d /opt/app/ICU ]; then
-  sudo -u ubuntu git clone https://github.com/amanpal02x/ICU.git /opt/app/ICU
+# clone repo if missing
+if [ ! -d "$APP_DIR" ]; then
+  echo ">>> cloning repo into $APP_DIR"
+  sudo -u ubuntu git clone https://github.com/amanpal02x/ICU.git "$APP_DIR"
 else
-  cd /opt/app/ICU
+  cd "$APP_DIR"
   sudo -u ubuntu git pull || true
 fi
 
-cd /opt/app/ICU
+cd "$APP_DIR"
 
-# create venv and install requirements as ubuntu user
-sudo -u ubuntu python3 -m venv venv
-sudo -u ubuntu /opt/app/ICU/venv/bin/python -m pip install --upgrade pip
-sudo -u ubuntu /opt/app/ICU/venv/bin/pip install -r backend/requirements.txt
-sudo -u ubuntu /opt/app/ICU/venv/bin/pip install uvicorn
+echo ">>> creating venv at $VENV_DIR (as ubuntu)"
+sudo -u ubuntu python3 -m venv "$VENV_DIR"
 
-# Ensure backend/models directory exists
-sudo -u ubuntu mkdir -p /opt/app/ICU/backend/models
+echo ">>> upgrading pip and installing requirements (as ubuntu)"
+sudo -u ubuntu "$VENV_DIR/bin/python" -m pip install --upgrade pip
+if [ -f "$BACKEND_DIR/requirements.txt" ]; then
+  sudo -u ubuntu "$VENV_DIR/bin/pip" install -r "$BACKEND_DIR/requirements.txt"
+else
+  echo "!! WARNING: $BACKEND_DIR/requirements.txt not found"
+fi
+# ensure uvicorn present
+sudo -u ubuntu "$VENV_DIR/bin/pip" install uvicorn
 
-# Download expected model filename from S3 into backend/models/
-# NOTE: update S3 path if your object key differs
-aws s3 cp s3://${aws_s3_bucket.model_bucket.bucket}/vitals_model_tuned.joblib /opt/app/ICU/backend/models/vitals_model_tuned.joblib --region ${var.aws_region} || true
+# ensure backend/models exists
+sudo -u ubuntu mkdir -p "$BACKEND_DIR/models"
 
-# Create .env file for environment variables (if not present)
-cat > /opt/app/ICU/.env <<EOL
+# try to download model from S3 into expected path (harmless if fails)
+echo ">>> attempting to download model from s3://$MODEL_S3_BUCKET/$MODEL_KEY"
+if command -v aws >/dev/null 2>&1; then
+  aws s3 cp "s3://$MODEL_S3_BUCKET/$MODEL_KEY" "$MODEL_LOCAL" --region ${var.aws_region} || echo "NOTE: s3 cp failed or object missing; continue"
+  sudo chown ubuntu:ubuntu "$MODEL_LOCAL" || true
+else
+  echo "NOTE: aws cli not found or not configured; skip s3 model download"
+fi
+
+# create .env (safe overwrite)
+cat > "$ENV_FILE" <<'EOL'
 PORT=8000
 DISABLE_DEV_RELOAD=true
 USE_REAL_MONITOR_DATA=false
 MONGO_URI="${var.mongodb_uri}"
 EOL
-chown ubuntu:ubuntu /opt/app/ICU/.env
-chmod 600 /opt/app/ICU/.env
+chown ubuntu:ubuntu "$ENV_FILE"
+chmod 600 "$ENV_FILE"
 
-# Create systemd service that uses the venv python
-cat <<EOT > /etc/systemd/system/fastapi.service
+# write systemd unit that uses the venv python
+echo ">>> writing systemd unit /etc/systemd/system/fastapi.service"
+sudo tee /etc/systemd/system/fastapi.service > /dev/null <<'UNIT'
 [Unit]
 Description=ICU FastAPI (uvicorn) service
 After=network.target
@@ -226,16 +244,39 @@ StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
-EOT
+UNIT
 
-# reload and start service
+# reload systemd and start service
+echo ">>> reloading systemd and starting fastapi"
 systemctl daemon-reload
 systemctl enable fastapi
 systemctl restart fastapi || (journalctl -u fastapi -n 200; exit 1)
+
+# show status, logs, port, and run a local health check
+echo
+echo "===== SERVICE STATUS ====="
+systemctl status fastapi --no-pager || true
+
+echo
+echo "===== LAST 120 LOG LINES (fastapi) ====="
+journalctl -u fastapi -n 120 --no-pager || true
+
+echo
+echo "===== LISTENING SOCKETS (port 8000) ====="
+ss -lntp | egrep ':8000\s' || true
+
+echo
+echo "===== LOCAL CURL /health ====="
+curl -sS -D - http://127.0.0.1:8000/health || true
+
+echo
+echo ">>> Done. If service isn't 'active (running)', inspect the journal above."
 EOF
 
+  tags = {
+    Name = "icu-backend"
+  }
 }
-
 
 # ALB + HTTPS
 
@@ -270,79 +311,35 @@ resource "aws_lb_listener" "http" {
   protocol          = "HTTP"
 
   default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.tg.arn
+    # IF certificate ARN exists → redirect HTTP → HTTPS
+    type = var.certificate_arn != "" ? "redirect" : "forward"
+
+    # redirect block only used when certificate ARN exists
+    redirect {
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_301"
+    }
+
+    # forward only used when certificate ARN is empty
+    forward {
+      target_group {
+        arn = aws_lb_target_group.tg.arn
+      }
+    }
+  }
+
+  lifecycle {
+    create_before_destroy = true
   }
 }
 
-# resource "aws_lb_listener" "http" {
-#   load_balancer_arn = aws_lb.app_lb.arn
-#   port              = 80
-#   protocol          = "HTTP"
-
-#   default_action {
-#     type = "redirect"
-
-#     redirect {
-#       port        = "443"
-#       protocol    = "HTTPS"
-#       status_code = "HTTP_301"
-#     }
-#   }
-# }
-
-# resource "aws_acm_certificate" "cert" {
-#   domain_name       = var.domain_name
-#   validation_method = "DNS"
-# }
-
-# resource "aws_route53_record" "cert_validation" {
-#   name    = aws_acm_certificate.cert.domain_validation_options[0].resource_record_name
-#   type    = aws_acm_certificate.cert.domain_validation_options[0].resource_record_type
-#   zone_id = var.hosted_zone_id
-#   records = [aws_acm_certificate.cert.domain_validation_options[0].resource_record_value]
-#   ttl     = 60
-# }
-
-# resource "aws_acm_certificate_validation" "cert_validated" {
-#   certificate_arn         = aws_acm_certificate.cert.arn
-#   validation_record_fqdns = [aws_route53_record.cert_validation.fqdn]
-# }
-
-# resource "aws_lb_listener" "https" {
-#   load_balancer_arn = aws_lb.app_lb.arn
-#   port              = 443
-#   protocol          = "HTTPS"
-#   ssl_policy        = "ELBSecurityPolicy-2016-08"
-#   certificate_arn   = aws_acm_certificate_validation.cert_validated.certificate_arn
-
-#   default_action {
-#     type             = "forward"
-#     target_group_arn = aws_lb_target_group.tg.arn
-#   }
-# }
 
 resource "aws_lb_target_group_attachment" "attach_ec2" {
   target_group_arn = aws_lb_target_group.tg.arn
   target_id        = aws_instance.backend.id
   port             = 8000
 }
-
-
-
-# # ROUTE 53 — DOMAIN → ALB
-
-# resource "aws_route53_record" "domain_record" {
-#   zone_id = var.hosted_zone_id
-#   name    = var.domain_name
-#   type    = "A"
-
-#   alias {
-#     name                   = aws_lb.app_lb.dns_name
-#     zone_id                = aws_lb.app_lb.zone_id
-#     evaluate_target_health = true
-#   }
-# }
 
 resource "tls_private_key" "ec2_private_key" {
   algorithm = "RSA"
@@ -359,10 +356,7 @@ resource "local_file" "private_key_pem" {
   filename = "${path.module}/icu-ec2-key.pem"
 }
 
-
-###########################################
 # OIDC provider for GitHub Actions
-###########################################
 
 resource "aws_iam_openid_connect_provider" "github" {
   url = "https://token.actions.githubusercontent.com"
@@ -373,10 +367,7 @@ resource "aws_iam_openid_connect_provider" "github" {
     "6938fd4d98bab03faadb97b34396831e3780aea1" # GitHub’s OIDC thumbprint
   ]
 }
-
-###########################################
 # IAM Role for GitHub Actions to assume
-###########################################
 
 resource "aws_iam_role" "github_actions_role" {
   name = "GitHubActionsTerraformRole"
@@ -412,15 +403,15 @@ resource "aws_iam_role_policy" "github_s3_policy" {
   role = aws_iam_role.github_actions_role.id
 
   policy = jsonencode({
-    Version = "2012-10-17",
+    Version = "2012-10-17"
     Statement = [
       {
-        Effect = "Allow",
+        Effect = "Allow"
         Action = [
           "s3:PutObject",
           "s3:GetObject",
           "s3:ListBucket"
-        ],
+        ]
         Resource = [
           aws_s3_bucket.model_bucket.arn,
           "${aws_s3_bucket.model_bucket.arn}/*"
@@ -429,4 +420,3 @@ resource "aws_iam_role_policy" "github_s3_policy" {
     ]
   })
 }
-
