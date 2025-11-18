@@ -50,19 +50,16 @@ resource "aws_iam_role_policy" "github_deploy_policy" {
         Resource = "*"
       },
       {
-        Sid    = "SSMSendCommand"
+        Sid    = "SSMSendCommandAll"
         Effect = "Allow"
         Action = [
           "ssm:SendCommand",
           "ssm:GetCommandInvocation",
           "ssm:ListCommands",
-          "ssm:ListCommandInvocations"
+          "ssm:ListCommandInvocations",
+          "ssm:DescribeInstanceInformation"
         ]
-        Resource = [
-          "arn:aws:ssm:${var.aws_region}:601559288497:document/AWS-RunShellScript",
-          "arn:aws:ec2:${var.aws_region}:601559288497:instance/*",
-          "arn:aws:ssm:${var.aws_region}:601559288497:managed-instance/*"
-        ]
+        Resource = "*"
       },
       {
         Sid    = "S3ReadModelBucket"
@@ -78,9 +75,4 @@ resource "aws_iam_role_policy" "github_deploy_policy" {
       }
     ]
   })
-}
-
-output "github_actions_role_arn" {
-  description = "ARN of the role GitHub Actions should assume (paste into GitHub secret AWS_ROLE_TO_ASSUME)"
-  value       = aws_iam_role.github_actions_deployer.arn
 }
