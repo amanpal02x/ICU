@@ -591,7 +591,7 @@ async def on_startup():
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000)) # Default port
+    port = int(os.environ.get("PORT", 8000)) # Default port
     disable_reload = os.environ.get("DISABLE_DEV_RELOAD", "false").lower() == "true"
 
     print(f"--- Starting Uvicorn on 0.0.0.0:{port} ---")
