@@ -110,7 +110,7 @@ async def root():
     """Health check endpoint"""
     return {
         "status": "healthy",
-        "message": "ICU Monitor API is running",
+        "message": "ICU Monitor API is running successfully",
         "version": "1.0.0"
     }
 
