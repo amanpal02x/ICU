@@ -6,19 +6,21 @@ on:
       - main
     paths:
       - "backend/**"
-      - "backend/requirements.txt" # Optimization: usually handled by git pull
+      - "backend/requirements.txt"
       - "backend/models/**"
       - ".github/workflows/update-backend.yml"
+  workflow_dispatch: {}
 
 permissions:
   id-token: write
   contents: read
 
 env:
-  # General configuration matching Terraform variables
   AWS_REGION: us-east-2
   EC2_INSTANCE_TAG: icu-backend
-  S3_BUCKET_NAME: icu-models
+  # NOTE: set this repo secret MODEL_S3_BUCKET_NAME to the bucket created by Terraform.
+  # If the secret is not set, the job will fall back to 'icu-models' at runtime.
+  S3_BUCKET_NAME: ${{ secrets.MODEL_S3_BUCKET_NAME }}
   APP_DIR: /opt/app/ICU
   BACKEND_SERVICE: fastapi
 
@@ -30,62 +32,93 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 1. Configure AWS Credentials (Uses OIDC to assume the role defined in main.tf)
-      - name: Configure AWS Credentials
+      - name: Debug info
+        run: |
+          echo "GITHUB_REF=$GITHUB_REF"
+          echo "GITHUB_SHA=$GITHUB_SHA"
+          aws --version || true
+          uname -a
+          echo "Assuming role: arn:aws:iam::601559288497:role/GitHubActionsTerraformRole"
+
+      - name: Configure AWS Credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v3
         with:
-          # --- CRITICAL CHANGE REQUIRED ---
           role-to-assume: arn:aws:iam::601559288497:role/GitHubActionsTerraformRole
           aws-region: ${{ env.AWS_REGION }}
 
-      # 2. Upload Model to S3 (Model change deployment)
-      - name: Upload model directory to S3
+      - name: Show assumed identity & check bucket
         run: |
-          # FIX: Using the environment variable for S3 bucket name
-          aws s3 cp backend/models/ s3://${{ env.S3_BUCKET_NAME }}/models/ --recursive || echo "s3 upload returned non-zero (check path / permissions)"
-          echo "Model upload complete."
+          set -euo pipefail
 
-      # 3. Deploy/Update the EC2 Backend via SSM (Code change deployment)
-      - name: Update EC2 Backend via SSM
-        run: |
-          echo "Finding running EC2 instance by tag: Name=${{ env.EC2_INSTANCE_TAG }}"
+          # Use secret if set, otherwise fallback to 'icu-models'
+          S3_BUCKET_NAME="${S3_BUCKET_NAME:-}"
+          # The GitHub expression above populated env.S3_BUCKET_NAME with the secret (or empty).
+          : "${S3_BUCKET_NAME:=${{ env.S3_BUCKET_NAME || 'icu-models' }}}"
 
-          INSTANCE_ID=$(aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=${{ env.EC2_INSTANCE_TAG }}" "Name=instance-state-name,Values=running" \
-            --query 'Reservations[].Instances[].InstanceId' \
-            --output text)
+          echo "Using S3_BUCKET_NAME=$S3_BUCKET_NAME"
+          echo "Caller identity:"
+          aws sts get-caller-identity --region "$AWS_REGION"
+          echo "Checking bucket existence: $S3_BUCKET_NAME"
 
-          if [ -z "$INSTANCE_ID" ]; then
-            echo "::error::Could not find a running EC2 instance with tag Name=${{ env.EC2_INSTANCE_TAG }}. Is the instance up and registered with SSM?"
+          if aws s3api head-bucket --bucket "$S3_BUCKET_NAME" --region "$AWS_REGION" 2>/dev/null; then
+            echo "Bucket $S3_BUCKET_NAME exists and is reachable."
+          else
+            echo "::error::Bucket '$S3_BUCKET_NAME' not found in region $AWS_REGION or you don't have permission to access it."
+            aws s3 ls || true
             exit 1
           fi
 
-          echo "Found instance: $INSTANCE_ID. Sending update command via SSM..."
+      - name: Upload model directory to S3
+        run: |
+          set -euo pipefail
+          # ensure local fallback if secret not set
+          S3_BUCKET_NAME="${S3_BUCKET_NAME:-icu-models}"
+          echo "Uploading backend/models -> s3://$S3_BUCKET_NAME/models/ (region: $AWS_REGION)"
+          aws s3 cp backend/models/ s3://"$S3_BUCKET_NAME"/models/ --recursive --region "$AWS_REGION"
+          echo "Model upload complete."
 
-          # This command script pulls code and restarts the service on the EC2 instance
+      - name: Update EC2 Backend via SSM
+        run: |
+          set -euo pipefail
+
+          # ensure local fallback if secret not set
+          S3_BUCKET_NAME="${S3_BUCKET_NAME:-icu-models}"
+
+          echo "Finding running EC2 instance by tag: ${EC2_INSTANCE_TAG}"
+
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=${EC2_INSTANCE_TAG}" "Name=instance-state-name,Values=running" \
+            --query 'Reservations[].Instances[].InstanceId' \
+            --output text \
+            --region "$AWS_REGION")
+
+          if [ -z "$INSTANCE_ID" ]; then
+            echo "::error::No EC2 instance found with tag Name=${EC2_INSTANCE_TAG}"
+            aws ec2 describe-instances --filters "Name=tag:Name,Values=${EC2_INSTANCE_TAG}" --region "$AWS_REGION" || true
+            exit 1
+          fi
+
+          echo "Instance found: $INSTANCE_ID"
+
           UPDATE_COMMAND=$(cat <<'EOF'
-          echo "--- Starting Code Pull, Requirements Update, and Service Restart ---"
+#!/bin/bash
+set -euo pipefail
+echo "--- Starting Code Pull, Requirements Update, and Service Restart ---"
+cd /opt/app/ICU || { echo "App directory not found"; exit 1; }
+sudo -u ubuntu git pull
+sudo -u ubuntu /opt/app/ICU/venv/bin/pip install -r /opt/app/ICU/backend/requirements.txt
+systemctl daemon-reload
+systemctl restart fastapi
+echo "--- Service Restart Triggered ---"
+EOF
+)
 
-          # Navigate to app directory
-          cd /opt/app/ICU || (echo "App directory not found." && exit 1)
-
-          # Pull latest code and install requirements as the 'ubuntu' user
-          sudo -u ubuntu git pull 
-          sudo -u ubuntu /opt/app/ICU/venv/bin/pip install -r /opt/app/ICU/backend/requirements.txt
-          # Restart the FastAPI service
-          systemctl daemon-reload
-          systemctl restart fastapi
-
-          echo "--- Service Restart Triggered ---"
-          EOF
-          )
-
-          # Send the command via SSM
-          aws ssm send-command \
+          CMD_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
-            --comment "Update code and restart fastapi service" \
+            --comment "Update backend via SSM" \
             --parameters commands="$UPDATE_COMMAND" \
-            --output text
+            --output text \
+            --region "$AWS_REGION")
 
-          echo "SSM command sent. Check AWS Systems Manager Run Command logs for status."
+          echo "SSM Command ID: $CMD_ID"

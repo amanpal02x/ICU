@@ -140,7 +140,7 @@ resource "aws_iam_role" "ec2_role" {
   })
 }
 
-# 1. Policy for S3 Read Access (Existing)
+# 1. Policy for S3 Read Access (tightened to bucket ARN below after bucket creation)
 resource "aws_iam_role_policy" "s3_read" {
   name = "s3_read_policy"
   role = aws_iam_role.ec2_role.id
@@ -152,8 +152,12 @@ resource "aws_iam_role_policy" "s3_read" {
         "s3:GetObject",
         "s3:ListBucket"
       ]
-      Effect   = "Allow"
-      Resource = "*"
+      Effect = "Allow"
+      Resource = [
+        # these will be replaced with the actual bucket ARN created below
+        aws_s3_bucket.model_bucket.arn,
+        "${aws_s3_bucket.model_bucket.arn}/*"
+      ]
     }]
   })
 }
@@ -170,10 +174,21 @@ resource "aws_iam_instance_profile" "ec2_profile" {
   depends_on = [aws_iam_role_policy_attachment.ssm_core_attach]
 }
 
-# S3 BUCKET (Model Storage)
+########################################################################
+# Create bucket with a randomized suffix to avoid global name collisions
+########################################################################
+resource "random_id" "bucket_suffix" {
+  byte_length = 4
+}
+
 resource "aws_s3_bucket" "model_bucket" {
-  bucket        = "icu-model"
+  bucket        = "${var.s3_bucket_prefix}-${random_id.bucket_suffix.hex}"
   force_destroy = true
+
+  tags = {
+    Name = "icu-models"
+    Env  = "dev"
+  }
 }
 
 # EC2 INSTANCE (FASTAPI BACKEND)
@@ -472,6 +487,46 @@ resource "aws_iam_role_policy" "github_s3_policy" {
           aws_s3_bucket.model_bucket.arn,
           "${aws_s3_bucket.model_bucket.arn}/*"
         ]
+      }
+    ]
+  })
+}
+
+# Grant the GitHub Actions OIDC role the permissions required to discover the EC2 instance and
+# to send SSM commands. This is the minimal set required by your GH Actions workflow.
+resource "aws_iam_role_policy" "github_ec2_ssm_policy" {
+  name = "GitHubActionsEC2SSMPolicy"
+  role = aws_iam_role.github_actions_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Sid    = "DescribeEC2",
+        Effect = "Allow",
+        Action = [
+          "ec2:DescribeInstances",
+          "ec2:DescribeTags",
+          "ec2:DescribeInstanceStatus"
+        ],
+        Resource = "*"
+      },
+      {
+        Sid    = "SSMCommands",
+        Effect = "Allow",
+        Action = [
+          "ssm:SendCommand",
+          "ssm:ListCommands",
+          "ssm:GetCommandInvocation",
+          "ssm:ListCommandInvocations"
+        ],
+        Resource = "*"
+      },
+      {
+        Sid      = "STSCallerIdentity",
+        Effect   = "Allow",
+        Action   = ["sts:GetCallerIdentity"],
+        Resource = "*"
       }
     ]
   })
