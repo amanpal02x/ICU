@@ -27,3 +27,16 @@ variable "certificate_arn" {
   type        = string
   default     = ""
 }
+
+variable "s3_bucket_prefix" {
+  description = "Prefix for the S3 bucket used for storing ML models. Terraform will append a short random suffix to avoid global name collisions."
+  type        = string
+  default     = "icu-models"
+}
+
+
+variable "s3_bucket_name" {
+  description = "(Optional) Fixed S3 bucket name to use. Leave empty to use s3_bucket_prefix + random suffix."
+  type        = string
+  default     = ""
+}
