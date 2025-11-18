@@ -29,4 +29,4 @@ jobs:
 
       - name: Upload model to S3
         run: |
-          aws s3 cp backend/model.pkl s3://icu-model
+          aws s3 cp backend/models/ s3://icu-model/models/ --recursive
