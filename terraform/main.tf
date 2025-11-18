@@ -173,7 +173,7 @@ resource "aws_iam_instance_profile" "ec2_profile" {
 }
 
 # S3 BUCKET (Model Storage)
-resource "aws_s3_bucket" "model_fbucket" {
+resource "aws_s3_bucket" "model_bucket" {
   bucket        = "icu-model"
   force_destroy = true
 }
