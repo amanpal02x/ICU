@@ -20,7 +20,7 @@ data "aws_ami" "ubuntu_latest" {
 }
 
 
-# VPC + SUBNETS + IGW + ROUTING (No changes)
+# VPC + SUBNETS + IGW + ROUTING
 
 resource "aws_vpc" "main" {
   cidr_block = "10.0.0.0/16"
@@ -126,7 +126,7 @@ resource "aws_security_group" "ec2_sg" {
 ###########################################
 
 resource "aws_iam_role" "ec2_role" {
-  name = "ec2_s3_ssm_role" # Renamed for clarity on SSM addition
+  name = "ec2_s3_ssm_role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -160,15 +160,13 @@ resource "aws_iam_role_policy" "s3_read" {
 
 # 2. Policy for SSM Managed Core (NEW: Enables remote code pull and restart)
 resource "aws_iam_role_policy_attachment" "ssm_core_attach" {
-  # This policy allows the EC2 instance to be managed by AWS Systems Manager Agent
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
   role       = aws_iam_role.ec2_role.name
 }
 
 resource "aws_iam_instance_profile" "ec2_profile" {
-  name = "ec2_profile"
-  role = aws_iam_role.ec2_role.name
-  # Ensure SSM attachment is created before the profile
+  name       = "ec2_profile"
+  role       = aws_iam_role.ec2_role.name
   depends_on = [aws_iam_role_policy_attachment.ssm_core_attach]
 }
 
@@ -181,7 +179,7 @@ resource "aws_s3_bucket" "model_bucket" {
 # EC2 INSTANCE (FASTAPI BACKEND)
 resource "aws_instance" "backend" {
   ami                         = data.aws_ami.ubuntu_latest.id
-  instance_type               = "c7i-flex.large"
+  instance_type               = "m7i-flex.large"
   subnet_id                   = aws_subnet.public_a.id
   vpc_security_group_ids      = [aws_security_group.ec2_sg.id]
   iam_instance_profile        = aws_iam_instance_profile.ec2_profile.name
@@ -193,11 +191,22 @@ resource "aws_instance" "backend" {
 #!/bin/bash
 set -euo pipefail
 
-# Install dependencies needed for code setup and SSM agent
+# --- 1. System Updates and Tool Installation ---
 apt update
 apt install -y git python3 python3-pip python3-venv awscli jq
 
-# change to app dir
+# FIX: Manually install and start the SSM Agent
+# This ensures the EC2 instance can receive commands from your GitHub workflow
+mkdir -p /tmp/ssm
+cd /tmp/ssm
+wget https://s3.amazonaws.com/ec2-downloads-DE-Frankfurt/SSMAgent/latest/debian_amd64/amazon-ssm-agent.deb
+dpkg -i amazon-ssm-agent.deb
+systemctl enable amazon-ssm-agent
+systemctl start amazon-ssm-agent
+cd /
+rm -rf /tmp/ssm
+
+# --- 2. Application Setup ---
 APP_DIR=/opt/app/ICU
 BACKEND_DIR="$APP_DIR/backend"
 VENV_DIR="$APP_DIR/venv"
@@ -253,7 +262,7 @@ EOL
 chown $USER_NAME:$USER_NAME "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
-# write systemd unit that uses the venv python
+# --- 3. Systemd Service Setup ---
 echo ">>> writing systemd unit /etc/systemd/system/fastapi.service"
 sudo tee /etc/systemd/system/fastapi.service > /dev/null <<'UNIT'
 [Unit]
@@ -266,7 +275,7 @@ Group=ubuntu
 WorkingDirectory=/opt/app/ICU/backend
 EnvironmentFile=/opt/app/ICU/.env
 ExecStart=/opt/app/ICU/venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8000
-Restart=always # Changed to 'always' for robust operation
+Restart=always 
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
