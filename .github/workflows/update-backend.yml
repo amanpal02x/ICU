@@ -4,10 +4,9 @@ on:
   push:
     branches:
       - main
-    # FIX: Explicitly target the backend code and the models directory
     paths:
       - "backend/**"
-      - "!backend/requirements.txt" # Optimization: usually handled by git pull
+      - "backend/requirements.txt" # Optimization: usually handled by git pull
       - "backend/models/**"
       - "update-backend.yml"
 
@@ -19,7 +18,7 @@ env:
   # General configuration matching Terraform variables
   AWS_REGION: us-east-2
   EC2_INSTANCE_TAG: icu-backend
-  S3_BUCKET_NAME: icu-model # Matches the name of aws_s3_bucket.model_bucket in main.tf
+  S3_BUCKET_NAME: icu-models
   APP_DIR: /opt/app/ICU
   BACKEND_SERVICE: fastapi
 
@@ -73,7 +72,6 @@ jobs:
           # Pull latest code and install requirements as the 'ubuntu' user
           sudo -u ubuntu git pull 
           sudo -u ubuntu /opt/app/ICU/venv/bin/pip install -r /opt/app/ICU/backend/requirements.txt
-
           # Restart the FastAPI service
           systemctl daemon-reload
           systemctl restart fastapi
