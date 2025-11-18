@@ -13,11 +13,6 @@ variable "mongodb_uri" {
   type        = string
 }
 
-variable "ami_id" {
-  description = "Ubuntu AMI ID for us-east-2"
-  default     = "ami-0f5fcdfbd140e4ab7"
-}
-
 variable "key_pair" {
   description = "EC2 key pair name"
   type        = string

@@ -1,8 +1,26 @@
 provider "aws" {
-  region = "us-east-2"
+  region = var.aws_region # Use the variable for consistency
 }
 
-# VPC + SUBNETS + IGW + ROUTING
+# --- Data Source: Dynamic Ubuntu AMI Lookup (For latest security/patches) ---
+data "aws_ami" "ubuntu_latest" {
+  most_recent = true
+  owners      = ["099720109477"] # Canonical's AWS Account ID
+
+  filter {
+    name = "name"
+    # Match pattern for latest Ubuntu LTS HVM-SSD server image
+    values = ["ubuntu/images/hvm-ssd/ubuntu-*-amd64-server-*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
+
+# VPC + SUBNETS + IGW + ROUTING (No changes)
 
 resource "aws_vpc" "main" {
   cidr_block = "10.0.0.0/16"
@@ -46,7 +64,7 @@ resource "aws_route_table_association" "b" {
   route_table_id = aws_route_table.public_rt.id
 }
 
-# SECURITY GROUPS
+# SECURITY GROUPS (No changes)
 # ALB Security Group
 resource "aws_security_group" "alb_sg" {
   name   = "alb-sg"
@@ -104,11 +122,11 @@ resource "aws_security_group" "ec2_sg" {
 
 
 ###########################################
-# IAM (EC2 → S3 access)
+# IAM (EC2 → S3 access & SSM for Auto-Updates)
 ###########################################
 
 resource "aws_iam_role" "ec2_role" {
-  name = "ec2_s3_role"
+  name = "ec2_s3_ssm_role" # Renamed for clarity on SSM addition
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -122,6 +140,7 @@ resource "aws_iam_role" "ec2_role" {
   })
 }
 
+# 1. Policy for S3 Read Access (Existing)
 resource "aws_iam_role_policy" "s3_read" {
   name = "s3_read_policy"
   role = aws_iam_role.ec2_role.id
@@ -139,13 +158,21 @@ resource "aws_iam_role_policy" "s3_read" {
   })
 }
 
+# 2. Policy for SSM Managed Core (NEW: Enables remote code pull and restart)
+resource "aws_iam_role_policy_attachment" "ssm_core_attach" {
+  # This policy allows the EC2 instance to be managed by AWS Systems Manager Agent
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+  role       = aws_iam_role.ec2_role.name
+}
+
 resource "aws_iam_instance_profile" "ec2_profile" {
   name = "ec2_profile"
   role = aws_iam_role.ec2_role.name
+  # Ensure SSM attachment is created before the profile
+  depends_on = [aws_iam_role_policy_attachment.ssm_core_attach]
 }
 
 # S3 BUCKET (Model Storage)
-
 resource "aws_s3_bucket" "model_bucket" {
   bucket        = "icu-model"
   force_destroy = true
@@ -153,7 +180,7 @@ resource "aws_s3_bucket" "model_bucket" {
 
 # EC2 INSTANCE (FASTAPI BACKEND)
 resource "aws_instance" "backend" {
-  ami                         = var.ami_id
+  ami                         = data.aws_ami.ubuntu_latest.id
   instance_type               = "c7i-flex.large"
   subnet_id                   = aws_subnet.public_a.id
   vpc_security_group_ids      = [aws_security_group.ec2_sg.id]
@@ -161,9 +188,14 @@ resource "aws_instance" "backend" {
   associate_public_ip_address = true
   key_name                    = var.key_pair
 
+  # Cloud-init script to install dependencies and set up systemd service
   user_data = <<-EOF
 #!/bin/bash
 set -euo pipefail
+
+# Install dependencies needed for code setup and SSM agent
+apt update
+apt install -y git python3 python3-pip python3-venv awscli jq
 
 # change to app dir
 APP_DIR=/opt/app/ICU
@@ -173,46 +205,43 @@ MODEL_S3_BUCKET="${aws_s3_bucket.model_bucket.bucket}"
 MODEL_KEY="vitals_model_tuned.joblib"
 MODEL_LOCAL="$BACKEND_DIR/models/$MODEL_KEY"
 ENV_FILE="$APP_DIR/.env"
+USER_NAME="ubuntu"
 
 echo ">>> ensure app directory exists and correct owner"
 mkdir -p /opt/app
-chown -R ubuntu:ubuntu /opt/app
+chown -R $USER_NAME:$USER_NAME /opt/app
 
 # clone repo if missing
 if [ ! -d "$APP_DIR" ]; then
   echo ">>> cloning repo into $APP_DIR"
-  sudo -u ubuntu git clone https://github.com/amanpal02x/ICU.git "$APP_DIR"
+  sudo -u $USER_NAME git clone https://github.com/amanpal02x/ICU.git "$APP_DIR"
 else
   cd "$APP_DIR"
-  sudo -u ubuntu git pull || true
+  sudo -u $USER_NAME git pull || true
 fi
 
 cd "$APP_DIR"
 
-echo ">>> creating venv at $VENV_DIR (as ubuntu)"
-sudo -u ubuntu python3 -m venv "$VENV_DIR"
+echo ">>> creating venv at $VENV_DIR (as $USER_NAME)"
+sudo -u $USER_NAME python3 -m venv "$VENV_DIR"
 
-echo ">>> upgrading pip and installing requirements (as ubuntu)"
-sudo -u ubuntu "$VENV_DIR/bin/python" -m pip install --upgrade pip
+echo ">>> upgrading pip and installing requirements (as $USER_NAME)"
+sudo -u $USER_NAME "$VENV_DIR/bin/python" -m pip install --upgrade pip
 if [ -f "$BACKEND_DIR/requirements.txt" ]; then
-  sudo -u ubuntu "$VENV_DIR/bin/pip" install -r "$BACKEND_DIR/requirements.txt"
+  sudo -u $USER_NAME "$VENV_DIR/bin/pip" install -r "$BACKEND_DIR/requirements.txt"
 else
   echo "!! WARNING: $BACKEND_DIR/requirements.txt not found"
 fi
 # ensure uvicorn present
-sudo -u ubuntu "$VENV_DIR/bin/pip" install uvicorn
+sudo -u $USER_NAME "$VENV_DIR/bin/pip" install uvicorn
 
 # ensure backend/models exists
-sudo -u ubuntu mkdir -p "$BACKEND_DIR/models"
+sudo -u $USER_NAME mkdir -p "$BACKEND_DIR/models"
 
-# try to download model from S3 into expected path (harmless if fails)
+# try to download model from S3 into expected path
 echo ">>> attempting to download model from s3://$MODEL_S3_BUCKET/$MODEL_KEY"
-if command -v aws >/dev/null 2>&1; then
-  aws s3 cp "s3://$MODEL_S3_BUCKET/$MODEL_KEY" "$MODEL_LOCAL" --region ${var.aws_region} || echo "NOTE: s3 cp failed or object missing; continue"
-  sudo chown ubuntu:ubuntu "$MODEL_LOCAL" || true
-else
-  echo "NOTE: aws cli not found or not configured; skip s3 model download"
-fi
+aws s3 cp "s3://$MODEL_S3_BUCKET/$MODEL_KEY" "$MODEL_LOCAL" --region ${var.aws_region} || echo "NOTE: s3 cp failed or object missing; continue"
+sudo chown $USER_NAME:$USER_NAME "$MODEL_LOCAL" || true
 
 # create .env (safe overwrite)
 cat > "$ENV_FILE" <<'EOL'
@@ -221,7 +250,7 @@ DISABLE_DEV_RELOAD=true
 USE_REAL_MONITOR_DATA=false
 MONGO_URI="${var.mongodb_uri}"
 EOL
-chown ubuntu:ubuntu "$ENV_FILE"
+chown $USER_NAME:$USER_NAME "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
 # write systemd unit that uses the venv python
@@ -237,7 +266,7 @@ Group=ubuntu
 WorkingDirectory=/opt/app/ICU/backend
 EnvironmentFile=/opt/app/ICU/.env
 ExecStart=/opt/app/ICU/venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8000
-Restart=on-failure
+Restart=always # Changed to 'always' for robust operation
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
@@ -305,13 +334,14 @@ resource "aws_lb_target_group" "tg" {
   }
 }
 
+# HTTP LISTENER (Frontend Connection Fix)
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.app_lb.arn
   port              = 80
   protocol          = "HTTP"
 
   default_action {
-    # IF certificate ARN exists → redirect HTTP → HTTPS
+    # FIX: If no certificate is provided, forward traffic (allows http connection from Amplify).
     type = var.certificate_arn != "" ? "redirect" : "forward"
 
     # redirect block only used when certificate ARN exists
@@ -321,7 +351,7 @@ resource "aws_lb_listener" "http" {
       status_code = "HTTP_301"
     }
 
-    # forward only used when certificate ARN is empty
+    # forward block only used when certificate ARN is empty
     forward {
       target_group {
         arn = aws_lb_target_group.tg.arn
@@ -334,6 +364,24 @@ resource "aws_lb_listener" "http" {
   }
 }
 
+# HTTPS LISTENER (Future-proofing: Created only when certificate ARN is provided)
+resource "aws_lb_listener" "https" {
+  count             = var.certificate_arn != "" ? 1 : 0
+  load_balancer_arn = aws_lb.app_lb.arn
+  port              = 443
+  protocol          = "HTTPS"
+  certificate_arn   = var.certificate_arn
+
+  default_action {
+    type = "forward"
+    forward {
+      target_group {
+        arn = aws_lb_target_group.tg.arn
+      }
+    }
+  }
+}
+
 
 resource "aws_lb_target_group_attachment" "attach_ec2" {
   target_group_arn = aws_lb_target_group.tg.arn
@@ -341,6 +389,7 @@ resource "aws_lb_target_group_attachment" "attach_ec2" {
   port             = 8000
 }
 
+# Keypair resources
 resource "tls_private_key" "ec2_private_key" {
   algorithm = "RSA"
   rsa_bits  = 4096
@@ -357,7 +406,6 @@ resource "local_file" "private_key_pem" {
 }
 
 # OIDC provider for GitHub Actions
-
 resource "aws_iam_openid_connect_provider" "github" {
   url = "https://token.actions.githubusercontent.com"
 
@@ -368,7 +416,6 @@ resource "aws_iam_openid_connect_provider" "github" {
   ]
 }
 # IAM Role for GitHub Actions to assume
-
 resource "aws_iam_role" "github_actions_role" {
   name = "GitHubActionsTerraformRole"
 
