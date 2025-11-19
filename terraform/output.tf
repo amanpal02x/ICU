@@ -1,6 +1,6 @@
 output "ec2_public_ip" {
-  description = "Public IP of the EC2 instance"
-  value       = aws_instance.app.public_ip
+  description = "Public IP (Elastic IP) of the EC2 instance"
+  value       = aws_eip.app_eip.public_ip
 }
 
 output "api_gateway_endpoint" {
@@ -8,7 +8,7 @@ output "api_gateway_endpoint" {
   value       = aws_apigatewayv2_api.httpapi.api_endpoint
 }
 
-output "s3_bucket_name" {
-  description = "S3 bucket name for models"
+output "s3_bucket" {
+  description = "S3 bucket for models & scripts"
   value       = aws_s3_bucket.models.bucket
 }

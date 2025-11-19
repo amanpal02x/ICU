@@ -72,6 +72,14 @@ resource "aws_iam_role_policy" "github_deploy_policy" {
           "arn:aws:s3:::${var.s3_bucket}",
           "arn:aws:s3:::${var.s3_bucket}/*"
         ]
+      },
+      {
+        Sid    = "S3PutDeployScripts",
+        Effect = "Allow",
+        Action = [
+          "s3:PutObject"
+        ],
+        Resource = "arn:aws:s3:::${var.s3_bucket}/scripts/*"
       }
     ]
   })

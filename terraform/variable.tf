@@ -16,12 +16,6 @@ variable "instance_type" {
   default     = "c7i-flex.large"
 }
 
-variable "s3_bucket" {
-  description = "S3 bucket name to store model files (must be unique or created elsewhere)"
-  type        = string
-  default     = "icu-model-bucket-unique-12345"
-}
-
 variable "git_repo" {
   description = "Git URL of backend repo"
   type        = string
@@ -59,4 +53,8 @@ variable "ssh_public_key" {
   description = "Full SSH public key text (e.g. contents of ~/.ssh/id_rsa.pub). If provided, Terraform will create an aws_key_pair."
   type        = string
   default     = ""
+}
+variable "s3_bucket" {
+  description = "S3 bucket name for ML models & deploy scripts"
+  type        = string
 }
