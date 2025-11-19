@@ -13,7 +13,9 @@ provider "aws" {
 
 data "aws_availability_zones" "available" {}
 
-# --- VPC / Subnet / IGW / Route ---
+# --------------------------
+# VPC, Subnet, IGW, Routing
+# --------------------------
 resource "aws_vpc" "main" {
   cidr_block = "10.0.0.0/16"
   tags       = { Name = "${var.project_name}-vpc" }
@@ -29,10 +31,12 @@ resource "aws_subnet" "public" {
 
 resource "aws_internet_gateway" "igw" {
   vpc_id = aws_vpc.main.id
+  tags   = { Name = "${var.project_name}-igw" }
 }
 
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.main.id
+  tags   = { Name = "${var.project_name}-public-rt" }
 }
 
 resource "aws_route" "internet_access" {
@@ -46,7 +50,9 @@ resource "aws_route_table_association" "public_assoc" {
   route_table_id = aws_route_table.public.id
 }
 
-# --- Security Group ---
+# --------------------------
+# Security Group
+# --------------------------
 resource "aws_security_group" "app_sg" {
   name        = "${var.project_name}-sg"
   description = "Allow SSH and app port"
@@ -79,7 +85,9 @@ resource "aws_security_group" "app_sg" {
   tags = { Name = "${var.project_name}-sg" }
 }
 
-# --- IAM Role & Instance Profile (assumes you have data/policies elsewhere; keep AmazonSSMManagedInstanceCore attachment) ---
+# --------------------------
+# EC2 IAM Role & Instance Profile (for SSM & S3 reads)
+# --------------------------
 data "aws_iam_policy_document" "ec2_assume_role" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -93,28 +101,40 @@ data "aws_iam_policy_document" "ec2_assume_role" {
 resource "aws_iam_role" "ec2_role" {
   name               = "${var.project_name}-ec2-role"
   assume_role_policy = data.aws_iam_policy_document.ec2_assume_role.json
+  tags               = { Name = "${var.project_name}-ec2-role" }
 }
 
+# Attach AmazonSSMManagedInstanceCore so SSM works
 resource "aws_iam_role_policy_attachment" "ssm_managed" {
   role       = aws_iam_role.ec2_role.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-resource "aws_iam_role_policy" "s3_read_policy" {
-  name = "${var.project_name}-s3-read"
-  role = aws_iam_role.ec2_role.id
+# Allow EC2 to read deploy scripts and models from the S3 bucket
+resource "aws_iam_role_policy" "ec2_s3_read" {
+  name = "${var.project_name}-ec2-s3-read"
+  role = aws_iam_role.ec2_role.name
+
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
+        Effect = "Allow",
         Action = [
-          "s3:GetObject",
+          "s3:GetObject"
+        ],
+        Resource = [
+          "arn:aws:s3:::${var.s3_bucket}/scripts/*",
+          "arn:aws:s3:::${var.s3_bucket}/models/*"
+        ]
+      },
+      {
+        Effect = "Allow",
+        Action = [
           "s3:ListBucket"
         ],
-        Effect = "Allow",
         Resource = [
-          "arn:aws:s3:::${var.s3_bucket}",
-          "arn:aws:s3:::${var.s3_bucket}/*"
+          "arn:aws:s3:::${var.s3_bucket}"
         ]
       }
     ]
@@ -126,7 +146,18 @@ resource "aws_iam_instance_profile" "ec2_instance_profile" {
   role = aws_iam_role.ec2_role.name
 }
 
-# --- Ubuntu 22.04 AMI ---
+# --------------------------
+# Optional: Create Key Pair from provided public key
+# --------------------------
+resource "aws_key_pair" "deployer" {
+  count      = var.ssh_public_key != "" ? 1 : 0
+  key_name   = "${var.project_name}-key"
+  public_key = var.ssh_public_key
+}
+
+# --------------------------
+# Ubuntu AMI data
+# --------------------------
 data "aws_ami" "ubuntu_2204" {
   most_recent = true
   owners      = ["099720109477"] # Canonical
@@ -140,14 +171,9 @@ data "aws_ami" "ubuntu_2204" {
   }
 }
 
-# --- Create AWS Key Pair only when ssh_public_key is provided ---
-resource "aws_key_pair" "deployer" {
-  count      = var.ssh_public_key != "" ? 1 : 0
-  key_name   = "${var.project_name}-key"
-  public_key = var.ssh_public_key
-}
-
-# --- EC2 instance (Ubuntu) ---
+# --------------------------
+# EC2 Instance (Ubuntu)
+# --------------------------
 resource "aws_instance" "app" {
   ami                         = data.aws_ami.ubuntu_2204.id
   instance_type               = var.instance_type
@@ -167,21 +193,21 @@ resource "aws_instance" "app" {
 
     apt-get update -y
     apt-get upgrade -y
-    apt-get install -y git python3 python3-venv python3-dev build-essential awscli unzip curl
+    apt-get install -y git python3 python3-venv python3-pip build-essential awscli unzip curl
 
-    # ensure pip exists
-    apt-get install -y python3-pip
+    # ensure pip exists and basic python libs
     python3 -m pip install --upgrade pip virtualenv boto3
 
-    # Install/enable SSM agent if not present
+    # install SSM agent (snap or apt)
     if ! systemctl is-active --quiet snap.amazon-ssm-agent.amazon-ssm-agent; then
       snap install amazon-ssm-agent --classic || true
       systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service || (apt-get install -y amazon-ssm-agent && systemctl enable --now amazon-ssm-agent)
     fi
 
-    # Create app user
+    # create app user
     id -u appuser >/dev/null 2>&1 || useradd -m -s /bin/bash appuser
 
+    # initial clone if missing (safe/optional)
     sudo -u appuser bash -lc '
       cd /home/appuser
       if [ ! -d app ]; then
@@ -196,52 +222,26 @@ resource "aws_instance" "app" {
       if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
     '
 
-    # systemd service for FastAPI (uvicorn)
-    cat > /etc/systemd/system/fastapi-app.service <<SERVICE
-    [Unit]
-    Description=FastAPI App (uvicorn) service
-    After=network.target
-
-    [Service]
-    Type=simple
-    User=appuser
-    WorkingDirectory=/home/appuser/app
-    Environment="MONGODB_URI=${var.mongodb_uri}"
-    Environment="S3_BUCKET=${var.s3_bucket}"
-    ExecStart=/bin/bash -lc 'source /home/appuser/app/venv/bin/activate && uvicorn ${var.uvicorn_app_module} --host 0.0.0.0 --port 8000 --workers ${var.uvicorn_workers}'
-    Restart=always
-    RestartSec=5
-    LimitNOFILE=65536
-
-    [Install]
-    WantedBy=multi-user.target
-    SERVICE
-
-    systemctl daemon-reload
-    systemctl enable --now fastapi-app || systemctl restart fastapi-app || true
-
     chown -R appuser:appuser /home/appuser
   EOF
 }
 
-# --- Elastic IP so instance public IP is stable ---
 # Elastic IP so instance public IP is stable
 resource "aws_eip" "app_eip" {
   instance = aws_instance.app.id
-  tags = {
-    Name = "${var.project_name}-eip"
-  }
+  tags     = { Name = "${var.project_name}-eip" }
 }
 
-# S3 Bucket for model artifacts
+# --------------------------
+# S3 Bucket for models & scripts
+# --------------------------
 resource "aws_s3_bucket" "models" {
   bucket        = var.s3_bucket
   force_destroy = true
-  tags = {
-    Name = "${var.project_name}-models"
-  }
+  tags          = { Name = "${var.project_name}-models" }
 }
 
+# Block public access (recommended)
 resource "aws_s3_bucket_public_access_block" "models_block" {
   bucket = aws_s3_bucket.models.id
 
@@ -251,9 +251,9 @@ resource "aws_s3_bucket_public_access_block" "models_block" {
   restrict_public_buckets = true
 }
 
-
-
-# --- API Gateway (HTTP API) to provide HTTPS endpoint that forwards to EC2 (via EIP) ---
+# --------------------------
+# API Gateway HTTP API (optional): forward to EC2 via EIP (HTTPS endpoint)
+# --------------------------
 resource "aws_apigatewayv2_api" "httpapi" {
   name          = "${var.project_name}-httpapi"
   protocol_type = "HTTP"
@@ -278,3 +278,4 @@ resource "aws_apigatewayv2_stage" "default" {
   name        = "$default"
   auto_deploy = true
 }
+
