@@ -1,0 +1,129 @@
+name: Deploy via SSM, Upload Models & Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "scripts/**"
+      - ".github/workflows/deploy.yml"
+
+jobs:
+  deploy-via-ssm:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Upload deploy script to S3
+        run: |
+          aws s3 cp scripts/deploy.sh s3://${{ secrets.S3_BUCKET_NAME }}/scripts/deploy.sh --acl private
+
+      - name: Find EC2 instance id by tagName
+        id: find_instance
+        run: |
+          # EC2 tag name that Terraform sets for the instance (e.g. ml-backend-xxxx-ec2)
+          TAG="${{ secrets.EC2_TAG_NAME }}"
+          echo "Searching for instances with tag Name=${TAG}"
+          INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=${TAG}" "Name=instance-state-name,Values=running" --query "Reservations[].Instances[].InstanceId" --output text)
+          if [ -z "$INSTANCE_ID" ]; then
+            echo "No running instance found with tag Name=${TAG}"
+            exit 2
+          fi
+          echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
+
+      - name: Run deploy script on EC2 via SSM
+        id: run_cmd
+        run: |
+          INSTANCE_ID="${{ steps.find_instance.outputs.instance_id }}"
+          BUCKET="${{ secrets.S3_BUCKET_NAME }}"
+
+          # Send command to EC2 to download script from S3 and execute it
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "CI deploy - download script from s3 and run" \
+            --parameters commands=["aws s3 cp s3://${BUCKET}/scripts/deploy.sh /home/ubuntu/deploy.sh","chmod +x /home/ubuntu/deploy.sh","/home/ubuntu/deploy.sh"] \
+            --timeout-seconds 600 \
+            --query "Command.CommandId" --output text)
+
+          echo "Sent command id: $CMD_ID"
+
+          # wait for completion (poll)
+          for i in $(seq 1 60); do
+            STATUS=$(aws ssm list-command-invocations --command-id "$CMD_ID" --details --query "CommandInvocations[0].Status" --output text)
+            echo "Invocation status: $STATUS"
+            if [ "$STATUS" = "Success" ]; then
+              echo "Command finished successfully"
+              exit 0
+            fi
+            if [[ "$STATUS" =~ ^(Cancelled|Failed|TimedOut|Canceled)$ ]]; then
+              echo "Command failed with status $STATUS"
+              aws ssm list-command-invocations --command-id "$CMD_ID" --details
+              exit 3
+            fi
+            sleep 5
+          done
+          echo "Command timed out waiting for completion"
+          exit 4
+
+  upload-models:
+    needs: deploy-via-ssm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect model files changed
+        id: changed
+        run: |
+          FILES=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} || echo "")
+          echo "changed_files=$FILES"
+          if echo "$FILES" | grep -E '^backend/models/' >/dev/null 2>&1; then
+            echo "models_changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "models_changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Configure AWS credentials
+        if: steps.changed.outputs.models_changed == 'true'
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Upload backend/models to S3
+        if: steps.changed.outputs.models_changed == 'true'
+        run: |
+          BUCKET="${{ secrets.S3_BUCKET_NAME }}"
+          aws s3 cp --recursive backend/models/ "s3://${BUCKET}/models/" || true
+
+  test:
+    needs: [deploy-via-ssm, upload-models]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run API tests (health + protected)
+        env:
+          API_URL: ${{ secrets.API_GATEWAY_URL }}
+          API_TEST_TOKEN: ${{ secrets.API_TEST_TOKEN }} # optional
+        run: |
+          chmod +x scripts/test_api.sh
+          ./scripts/test_api.sh "$API_URL" "$API_TEST_TOKEN"
