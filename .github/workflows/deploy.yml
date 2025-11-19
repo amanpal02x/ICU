@@ -81,7 +81,7 @@ jobs:
           # Escape backslashes and double quotes for JSON
           ESCAPED_CMD=$(printf '%s' "$REMOTE_CMD" | sed 's/\\/\\\\/g; s/"/\\"/g')
 
-          # Create params.json safely
+          # Create params.json using printf (no heredoc)
           printf '{"commands":["%s"]}\n' "$ESCAPED_CMD" > params.json
 
           echo "params.json:"

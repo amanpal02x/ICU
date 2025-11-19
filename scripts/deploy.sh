@@ -22,28 +22,30 @@ UVICORN_WORKERS="${UVICORN_WORKERS:-1}"
 #########################################
 # FIX: Install AWS CLI v2 (Ubuntu default AWS CLI v1 is broken)
 #########################################
-echo "Installing AWS CLI v2..."
+echo "Installing/ensuring AWS CLI v2..."
 apt-get update -y
 apt-get install -y unzip curl || true
 
-# Remove old AWS CLI if exists
+# Remove old awscli if present (avoid conflicts)
 apt-get remove -y awscli || true
 
-# Install AWS CLI v2 cleanly
-curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
-unzip -o /tmp/awscliv2.zip -d /tmp
-/tmp/aws/install --update
+# Install AWS CLI v2
+if ! command -v /usr/local/bin/aws >/dev/null 2>&1; then
+  curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+  unzip -o /tmp/awscliv2.zip -d /tmp
+  /tmp/aws/install --update
+fi
 
-echo "AWS CLI Installed:"
-/usr/local/bin/aws --version || true
+export PATH="/usr/local/bin:${PATH}"
+echo "AWS CLI location: $(command -v aws) ; version: $(aws --version 2>&1 || true)"
 
 #########################################
 # Install system packages
 #########################################
 apt-get update -y
-apt-get install -y git python3 python3-venv python3-pip curl
+apt-get install -y git python3 python3-venv python3-pip curl || true
 
-python3 -m pip install --upgrade pip
+python3 -m pip install --upgrade pip || true
 
 #########################################
 # Create app user
@@ -88,8 +90,7 @@ sudo -u appuser bash -lc "
 if [ -n "$S3_BUCKET" ]; then
   echo "Downloading model from S3..."
   sudo -u appuser mkdir -p /home/appuser/app/models
-  /usr/local/bin/aws s3 cp "s3://${S3_BUCKET}/models/latest_model.pkl" \
-      /home/appuser/app/models/latest_model.pkl || true
+  /usr/local/bin/aws s3 cp "s3://${S3_BUCKET}/models/latest_model.pkl" /home/appuser/app/models/latest_model.pkl || true
 fi
 
 #########################################
@@ -126,7 +127,7 @@ for i in $(seq 1 20); do
     echo "Health OK"
     exit 0
   fi
-  echo "Health check try $i failed..."
+  echo "Health check try $i failed, sleeping..."
   sleep 2
 done
 
