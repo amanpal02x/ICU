@@ -41,13 +41,20 @@ jobs:
           echo "Uploading scripts/deploy.sh to s3://${S3_BUCKET}/scripts/deploy.sh"
           aws s3 cp scripts/deploy.sh s3://${S3_BUCKET}/scripts/deploy.sh --region ${AWS_REGION}
 
-      - name: Run deploy script on EC2 via SSM (safe params)
+      - name: Create presigned URL for deploy script (so instance can curl it)
+        env:
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          PRESIGNED_URL=$(aws s3 presign "s3://${S3_BUCKET}/scripts/deploy.sh" --expires-in 3600 --region ${AWS_REGION})
+          echo "PRESIGNED_URL=${PRESIGNED_URL}" >> $GITHUB_ENV
+
+      - name: Run deploy script on EC2 via SSM (download via curl & execute)
         env:
           INSTANCE_TAG: ${{ secrets.PROJECT_NAME }}-ec2
           REGION: ${{ secrets.AWS_REGION }}
-          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          PRESIGNED_URL: ${{ env.PRESIGNED_URL }}
           GIT_REPO: ${{ secrets.GIT_REPO }}
-          MONGODB_URI: ${{ secrets.MONGODB_URI }}
           UVICORN_MODULE: ${{ secrets.UVICORN_APP_MODULE }}
           UVICORN_WORKERS: ${{ secrets.UVICORN_WORKERS }}
         run: |
@@ -64,20 +71,17 @@ jobs:
           fi
           echo "InstanceId: ${INSTANCE_ID}"
 
-          REMOTE_CMD="aws s3 cp s3://${S3_BUCKET}/scripts/deploy.sh /tmp/deploy.sh && chmod +x /tmp/deploy.sh"
-
+          # Build remote command: download script via curl (no aws cli needed on instance), make executable, export envs, run
+          REMOTE_CMD="curl -fsSL '${PRESIGNED_URL}' -o /tmp/deploy.sh && chmod +x /tmp/deploy.sh"
           [ -n "${GIT_REPO:-}" ] && REMOTE_CMD="${REMOTE_CMD} && export REPO_URL='${GIT_REPO}'"
-          [ -n "${S3_BUCKET:-}" ] && REMOTE_CMD="${REMOTE_CMD} && export S3_BUCKET='${S3_BUCKET}'"
-          [ -n "${MONGODB_URI:-}" ] && REMOTE_CMD="${REMOTE_CMD} && export MONGODB_URI='${MONGODB_URI}'"
           [ -n "${UVICORN_MODULE:-}" ] && REMOTE_CMD="${REMOTE_CMD} && export UVICORN_MODULE='${UVICORN_MODULE}'"
           [ -n "${UVICORN_WORKERS:-}" ] && REMOTE_CMD="${REMOTE_CMD} && export UVICORN_WORKERS='${UVICORN_WORKERS}'"
-
           REMOTE_CMD="${REMOTE_CMD} && bash /tmp/deploy.sh"
 
           # Escape backslashes and double quotes for JSON
           ESCAPED_CMD=$(printf '%s' "$REMOTE_CMD" | sed 's/\\/\\\\/g; s/"/\\"/g')
 
-          # Create params.json using printf (no heredoc)
+          # Create params.json safely
           printf '{"commands":["%s"]}\n' "$ESCAPED_CMD" > params.json
 
           echo "params.json:"
@@ -104,6 +108,7 @@ jobs:
 
             if [ "$STATUS" = "Success" ]; then
               echo "Deployment Succeeded!"
+              aws ssm get-command-invocation --instance-id "${INSTANCE_ID}" --command-id "${CMD_ID}" --region ${REGION} --query "{Stdout:StandardOutputContent}" --output text || true
               exit 0
             fi
 
@@ -112,7 +117,7 @@ jobs:
               aws ssm get-command-invocation \
                 --instance-id "${INSTANCE_ID}" \
                 --command-id "${CMD_ID}" \
-                --region ${REGION} --output json
+                --region ${REGION} --output json || true
               exit 1
             fi
             sleep 5
