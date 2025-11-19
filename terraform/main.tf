@@ -11,6 +11,9 @@ provider "aws" {
   region = var.aws_region
 }
 
+# Add caller identity data used by IAM policies
+data "aws_caller_identity" "current" {}
+
 data "aws_availability_zones" "available" {}
 
 # --------------------------
@@ -141,6 +144,27 @@ resource "aws_iam_role_policy" "ec2_s3_read" {
   })
 }
 
+
+resource "aws_iam_role_policy" "ec2_secrets_read" {
+  name = "${var.project_name}-ec2-secrets-read"
+  role = aws_iam_role.ec2_role.name
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret"
+        ],
+        Resource = "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:icu/mongodb_uri*"
+      }
+    ]
+  })
+}
+
+
 resource "aws_iam_instance_profile" "ec2_instance_profile" {
   name = "${var.project_name}-instance-profile"
   role = aws_iam_role.ec2_role.name
@@ -179,7 +203,7 @@ resource "aws_instance" "app" {
   instance_type               = var.instance_type
   subnet_id                   = aws_subnet.public.id
   vpc_security_group_ids      = [aws_security_group.app_sg.id]
-  key_name                    = var.ssh_key_name != "" ? var.ssh_key_name : (var.ssh_public_key != "" ? aws_key_pair.deployer[0].key_name : null)
+  key_name                    = var.ssh_key_name != "" ? var.ssh_key_name : (length(aws_key_pair.deployer) > 0 ? aws_key_pair.deployer[0].key_name : null)
   iam_instance_profile        = aws_iam_instance_profile.ec2_instance_profile.name
   associate_public_ip_address = true
   tags = {
@@ -278,4 +302,3 @@ resource "aws_apigatewayv2_stage" "default" {
   name        = "$default"
   auto_deploy = true
 }
-
