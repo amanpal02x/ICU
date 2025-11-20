@@ -1,18 +1,3 @@
-############################################################
-# main.tf - Full merged Terraform configuration
-# - Private EC2 (Ubuntu m7i-flex.large) in VPC
-# - S3 bucket for ML models (initial upload if present)
-# - IAM role for EC2 with S3 + SSM
-# - NLB fronting EC2 (target group)
-# - API Gateway (HTTP API v2) with VPC LINK -> NLB
-# - VPC, subnets, route tables, NACL, security groups
-# - VPC endpoints for SSM (interface) and S3 (gateway)
-# - Local file cloud-init to prepare instance, systemd service
-# - Outputs for API Gateway, S3, EC2, NLB
-# NOTE: this file expects variables to be declared in variables.tf
-# Uploaded screenshot path (for reference): /mnt/data/d0105f69-d89a-424d-ab91-9c75ef1d1cf7.png
-############################################################
-
 terraform {
   required_version = ">= 1.2.0"
   required_providers {
@@ -173,6 +158,8 @@ resource "aws_network_acl_association" "public_b_assoc" {
   network_acl_id = aws_network_acl.public_nacl.id
 }
 
+
+####################
 # S3 bucket + conditional initial model upload
 ####################
 resource "aws_s3_bucket" "model_bucket" {
@@ -237,11 +224,11 @@ resource "aws_iam_instance_profile" "ec2_profile" {
 }
 
 ####################
-# Security Group for EC2 (private)
+# Security Group for EC2 (public)
 ####################
 resource "aws_security_group" "ec2_sg" {
   name        = "${local.name_prefix}-sg"
-  description = "EC2 SG in private subnet"
+  description = "EC2 SG"
   vpc_id      = aws_vpc.main.id
 
   ingress {
@@ -256,6 +243,22 @@ resource "aws_security_group" "ec2_sg" {
     description = "Backend port"
     from_port   = var.backend_port
     to_port     = var.backend_port
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "HTTP"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "HTTPS"
+    from_port   = 443
+    to_port     = 443
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -343,16 +346,16 @@ resource "local_file" "cloud_init_tpl" {
 }
 
 ####################
-# EC2 in private subnet
+# EC2 in public subnet (public IP for debugging)
 ####################
 resource "aws_instance" "ml_server" {
   ami                         = data.aws_ami.ubuntu.id
   instance_type               = var.instance_type
   key_name                    = aws_key_pair.deployer.key_name
-  subnet_id                   = aws_subnet.private.id
+  subnet_id                   = aws_subnet.public_a.id # public subnet so instance has public IP
   vpc_security_group_ids      = [aws_security_group.ec2_sg.id]
   iam_instance_profile        = aws_iam_instance_profile.ec2_profile.name
-  associate_public_ip_address = false
+  associate_public_ip_address = true # assign public IP (visible in console)
 
   root_block_device {
     volume_size = 30
@@ -364,6 +367,14 @@ resource "aws_instance" "ml_server" {
   tags = {
     Name = "${local.name_prefix}-ec2"
   }
+}
+
+####################
+# Elastic IP for EC2 public IP (optional)
+####################
+resource "aws_eip" "ec2_eip" {
+  instance = aws_instance.ml_server.id
+  tags     = { Name = "${local.name_prefix}-eip" }
 }
 
 ####################

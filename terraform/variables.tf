@@ -26,7 +26,7 @@ variable "s3_bucket_prefix" {
 }
 
 variable "github_repo" {
-  description = "URL of your GitHub repo"
+  description = "URL of your GitHub repo (used by cloud-init to clone/pull)"
   type        = string
 }
 
@@ -43,18 +43,24 @@ variable "backend_port" {
 }
 
 variable "backend_start_cmd" {
-  description = "Command to start FastAPI backend"
+  description = "Command to start the backend inside the repo (executed by run_backend.sh)"
   type        = string
-  default     = "uvicorn main:app --host 0.0.0.0 --port 8000"
+  default     = "venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000"
 }
 
 variable "ssh_public_key" {
-  description = "SSH public key for EC2 access"
+  description = "SSH public key (contents of ~/.ssh/id_rsa.pub). Required to SSH into EC2."
   type        = string
+  default     = ""
 }
 
 variable "admin_cidr" {
-  description = "CIDR allowed to SSH into EC2 (auto-detected if null)"
+  description = "CIDR allowed to SSH into EC2 (set to e.g. x.x.x.x/32). If empty, Terraform will auto-detect your current IP at plan-time."
   type        = string
-  default     = null
+  default     = ""
+}
+variable "tags" {
+  description = "Additional tags to apply to all resources"
+  type        = map(string)
+  default     = {}
 }
