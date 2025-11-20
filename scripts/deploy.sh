@@ -6,8 +6,6 @@ set -euo pipefail
 # - ensures venv exists and installs requirements
 # - syncs models from S3 into backend/models/
 # - restarts the systemd service and performs a local /health check
-#
-# Uploaded screenshot (local path): /mnt/data/d0105f69-d89a-424d-ab91-9c75ef1d1cf7.png
 
 REPO_URL="${REPO_URL:-https://github.com/amanpal02x/ICU}"
 REPO_DIR="${REPO_DIR:-/home/ubuntu/ICU}"
@@ -16,7 +14,7 @@ VENV_DIR="${VENV_DIR:-${BACKEND_DIR}/venv}"
 SERVICE_NAME="${SERVICE_NAME:-ml-backend.service}"
 GIT_BRANCH="${GIT_BRANCH:-main}"
 BACKEND_PORT="${BACKEND_PORT:-8000}"
-S3_BUCKET="${S3_BUCKET:-}"   # expected to be provided as env var or secret in CI (S3 bucket name only)
+S3_BUCKET="${S3_BUCKET:-}"   # provided by SSM env export in workflow
 
 log() { echo "[$(date +'%Y-%m-%dT%H:%M:%S%z')] $*"; }
 

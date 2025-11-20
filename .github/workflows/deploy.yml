@@ -56,6 +56,7 @@ jobs:
           INSTANCE_ID: ${{ steps.find_instance.outputs.instance_id }}
           BUCKET: ${{ secrets.S3_BUCKET }}
         run: |
+          # Build JSON array of commands for AWS-RunShellScript
           CMD_JSON=$(jq -n --arg b "$BUCKET" '[
             "export S3_BUCKET=\($b)",
             "aws s3 cp s3://\($b)/scripts/deploy.sh /home/ubuntu/deploy.sh",
@@ -75,10 +76,9 @@ jobs:
 
           echo "Command ID: $CMD_ID"
 
-          # Poll until complete
+          # Poll until completion
           for i in $(seq 1 120); do
-            STATUS=$(aws ssm list-command-invocations --command-id "$CMD_ID" --details \
-              --query "CommandInvocations[0].Status" --output text)
+            STATUS=$(aws ssm list-command-invocations --command-id "$CMD_ID" --details --query "CommandInvocations[0].Status" --output text)
             echo "Status: $STATUS"
             if [ "$STATUS" = "Success" ]; then
               exit 0
@@ -86,6 +86,9 @@ jobs:
             if [[ "$STATUS" =~ ^(Failed|Cancelled|TimedOut|Canceled)$ ]]; then
               echo "SSM command failed!"
               aws ssm list-command-invocations --command-id "$CMD_ID" --details
+              # fetch logs for debugging
+              aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --query 'StandardOutputContent' --output text || true
+              aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --query 'StandardErrorContent' --output text || true
               exit 3
             fi
             sleep 5
