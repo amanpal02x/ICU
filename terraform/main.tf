@@ -1,619 +1,260 @@
 terraform {
-  required_version = ">= 1.2.0"
   required_providers {
-    aws  = { source = "hashicorp/aws", version = ">= 5.0" }
-    http = { source = "hashicorp/http", version = ">= 2.0" }
+    aws      = { source = "hashicorp/aws", version = ">= 4.0" }
+    template = { source = "hashicorp/template", version = ">= 2.0" }
   }
+  required_version = ">= 1.2.0"
 }
 
 provider "aws" {
-  region = var.aws_region
+  region = var.region
+}
+# -------------------------
+# S3 bucket for models
+# -------------------------
+resource "aws_s3_bucket" "model_bucket" {
+  bucket = var.s3_bucket_name
+  tags   = { Name = var.s3_bucket_name, Project = var.project_name }
 }
 
-####################
-# Locals
-####################
-locals {
-  name_prefix          = "${var.project_name}-${replace(var.aws_account_id, "/", "")}"
-  bucket_name          = "${var.s3_bucket_prefix}-${substr(var.aws_account_id, 0, 6)}"
-  initial_model_path   = "${path.module}/initial_model/model.pkl"
-  initial_model_exists = fileexists(local.initial_model_path)
+# -------------------------
+# Secrets Manager (MongoDB)
+# -------------------------
+resource "aws_secretsmanager_secret" "mongodb" {
+  name = "${var.project_name}-mongodb-uri"
 }
 
-####################
-# Data sources
-####################
+resource "aws_secretsmanager_secret_version" "mongodb_value" {
+  secret_id     = aws_secretsmanager_secret.mongodb.id
+  secret_string = var.mongodb_uri
+}
 
-data "aws_availability_zones" "available" {}
+data "aws_secretsmanager_secret_version" "mongodb" {
+  secret_id = aws_secretsmanager_secret.mongodb.id
+}
 
+# -------------------------
+# VPC / Subnet - use default
+# -------------------------
+data "aws_vpc" "default" { default = true }
+
+# -------------------------
+# IAM role & instance profile for EC2
+# -------------------------
+resource "aws_iam_role" "ec2_role" {
+  name = "icu-monitor-ec2-role-2"
+  assume_role_policy = jsonencode({
+    Version   = "2012-10-17",
+    Statement = [{ Action = "sts:AssumeRole", Effect = "Allow", Principal = { Service = "ec2.amazonaws.com" } }]
+  })
+}
+
+resource "aws_iam_policy" "ec2_policy" {
+  name = "${var.project_name}-ec2-policy"
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      { Effect = "Allow", Action = ["s3:GetObject", "s3:ListBucket"], Resource = [aws_s3_bucket.model_bucket.arn, "${aws_s3_bucket.model_bucket.arn}/*"] },
+      { Effect = "Allow", Action = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"], Resource = [aws_secretsmanager_secret.mongodb.arn] },
+      { Effect = "Allow", Action = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"], Resource = ["*"] }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ec2_attach" {
+  role       = aws_iam_role.ec2_role.name
+  policy_arn = aws_iam_policy.ec2_policy.arn
+}
+
+resource "aws_iam_instance_profile" "ec2_profile" {
+  name = "icu-monitor-instance-profile-2"
+  role = aws_iam_role.ec2_role.name
+}
+
+# -------------------------
+# Security Group (hardened)
+# -------------------------
+resource "aws_security_group" "ml_backend_sg" {
+  name   = "${var.project_name}-sg"
+  vpc_id = data.aws_vpc.default.id
+
+  # SSH — only from your IP
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = [var.ssh_allowed_cidr]
+  }
+
+  # Backend port (only API Gateway allowed) — use 0.0.0.0/0 as placeholder if you need testing
+  ingress {
+    from_port   = var.backend_port
+    to_port     = var.backend_port
+    protocol    = "tcp"
+    cidr_blocks = var.api_gateway_cidrs
+    description = "Allow API Gateway to reach EC2 backend"
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = { Name = "${var.project_name}-sg" }
+}
+
+# -------------------------
+# EC2 Instance (user-data installs CW agent & config, syncs models)
+# -------------------------
 data "aws_ami" "ubuntu" {
   most_recent = true
-  owners      = ["099720109477"] # Canonical
+
+  owners = ["099720109477"] # Canonical
+
   filter {
     name   = "name"
     values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
   }
+
   filter {
     name   = "virtualization-type"
     values = ["hvm"]
   }
 }
 
-# auto-detect caller public IP (used for admin CIDR if var not provided)
-data "http" "my_public_ip" {
-  url = "https://checkip.amazonaws.com/"
-  request_headers = {
-    "User-Agent" = "terraform"
-  }
+
+resource "aws_key_pair" "deployer_key" {
+  key_name   = "${var.project_name}-key"
+  public_key = var.ssh_public_key
 }
 
-locals {
-  admin_cidr_auto  = trimspace(data.http.my_public_ip.response_body) != "" ? "${trimspace(data.http.my_public_ip.response_body)}/32" : ""
-  admin_cidr_final = (var.admin_cidr != null && var.admin_cidr != "") ? var.admin_cidr : local.admin_cidr_auto
-}
+resource "aws_instance" "ml_instance" {
+  ami                         = data.aws_ami.ubuntu.id
+  instance_type               = var.instance_type
+  subnet_id                   = var.subnet_id
+  vpc_security_group_ids      = [aws_security_group.ml_backend_sg.id]
+  key_name                    = aws_key_pair.deployer_key.key_name
+  iam_instance_profile        = aws_iam_instance_profile.ec2_profile.name
+  associate_public_ip_address = true
 
-####################
-# VPC, Subnets, IGW, Route Tables
-####################
-resource "aws_vpc" "main" {
-  cidr_block           = "10.100.0.0/16"
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-  tags                 = { Name = "${local.name_prefix}-vpc" }
-}
-
-resource "aws_internet_gateway" "igw" {
-  vpc_id = aws_vpc.main.id
-  tags   = { Name = "${local.name_prefix}-igw" }
-}
-
-resource "aws_subnet" "public_a" {
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = "10.100.1.0/24"
-  availability_zone       = data.aws_availability_zones.available.names[0]
-  map_public_ip_on_launch = true
-  tags                    = { Name = "${local.name_prefix}-public-a" }
-}
-
-resource "aws_subnet" "public_b" {
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = "10.100.2.0/24"
-  availability_zone       = data.aws_availability_zones.available.names[1]
-  map_public_ip_on_launch = true
-  tags                    = { Name = "${local.name_prefix}-public-b" }
-}
-
-resource "aws_subnet" "private" {
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = "10.100.10.0/24"
-  availability_zone       = data.aws_availability_zones.available.names[0]
-  map_public_ip_on_launch = false
-  tags                    = { Name = "${local.name_prefix}-private" }
-}
-
-resource "aws_route_table" "public_rt" {
-  vpc_id = aws_vpc.main.id
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.igw.id
-  }
-  tags = { Name = "${local.name_prefix}-public-rt" }
-}
-
-resource "aws_route_table_association" "public_a" {
-  subnet_id      = aws_subnet.public_a.id
-  route_table_id = aws_route_table.public_rt.id
-}
-
-resource "aws_route_table_association" "public_b" {
-  subnet_id      = aws_subnet.public_b.id
-  route_table_id = aws_route_table.public_rt.id
-}
-
-####################
-# Network ACL (public)
-####################
-resource "aws_network_acl" "public_nacl" {
-  vpc_id = aws_vpc.main.id
-  tags   = { Name = "${local.name_prefix}-nacl" }
-}
-
-resource "aws_network_acl_rule" "allow_inbound_backend" {
-  network_acl_id = aws_network_acl.public_nacl.id
-  rule_number    = 100
-  protocol       = "6"
-  rule_action    = "allow"
-  egress         = false
-  cidr_block     = "0.0.0.0/0"
-  from_port      = var.backend_port
-  to_port        = var.backend_port
-}
-
-resource "aws_network_acl_rule" "allow_inbound_ssh" {
-  network_acl_id = aws_network_acl.public_nacl.id
-  rule_number    = 110
-  protocol       = "6"
-  rule_action    = "allow"
-  egress         = false
-  cidr_block     = local.admin_cidr_final
-  from_port      = 22
-  to_port        = 22
-}
-
-resource "aws_network_acl_rule" "allow_outbound_all" {
-  network_acl_id = aws_network_acl.public_nacl.id
-  rule_number    = 100
-  protocol       = "-1"
-  rule_action    = "allow"
-  egress         = true
-  cidr_block     = "0.0.0.0/0"
-}
-
-resource "aws_network_acl_association" "public_a_assoc" {
-  subnet_id      = aws_subnet.public_a.id
-  network_acl_id = aws_network_acl.public_nacl.id
-}
-resource "aws_network_acl_association" "public_b_assoc" {
-  subnet_id      = aws_subnet.public_b.id
-  network_acl_id = aws_network_acl.public_nacl.id
-}
+  user_data = templatefile("${path.module}/user-data.sh.tpl", {
+    s3_bucket    = aws_s3_bucket.model_bucket.bucket
+    secret_arn   = aws_secretsmanager_secret.mongodb.arn
+    backend_port = tostring(var.backend_port)
+    repo_url     = var.github_repo_url
+    branch       = var.github_branch
+    CWA_ZIP      = var.cwa_zip
+    region       = var.region
+    project_name = "icu-monitor"
+    MONGO_URI    = data.aws_secretsmanager_secret_version.mongodb.secret_string
+  })
 
 
-####################
-# S3 bucket + conditional initial model upload
-####################
-resource "aws_s3_bucket" "model_bucket" {
-  bucket        = local.bucket_name
-  force_destroy = true
-  tags          = { Name = local.bucket_name }
+
+
+
+  tags = { Name = "${var.project_name}-ml-instance" }
 }
 
-resource "aws_s3_object" "initial_model" {
-  count        = local.initial_model_exists ? 1 : 0
-  bucket       = aws_s3_bucket.model_bucket.id
-  key          = "models/initial_model.pkl"
-  source       = local.initial_model_path
-  etag         = local.initial_model_exists ? filemd5(local.initial_model_path) : null
-  content_type = "application/octet-stream"
+# -------------------------
+# CloudWatch Log Group (app logs)
+# -------------------------
+resource "aws_cloudwatch_log_group" "app_logs" {
+  name              = "/aws/ec2/${aws_instance.ml_instance.id}/app"
+  retention_in_days = var.log_retention_days
 }
 
-####################
-# IAM: EC2 role with S3 + SSM
-####################
-resource "aws_iam_role" "ec2_role" {
-  name = "${local.name_prefix}-ec2-role"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action    = "sts:AssumeRole"
-      Effect    = "Allow"
-      Principal = { Service = "ec2.amazonaws.com" }
-    }]
+# -------------------------
+# CloudWatch Agent config SSM parameter (optional)
+# -------------------------
+resource "aws_ssm_parameter" "cw_agent_config" {
+  name  = "/${var.project_name}/cloudwatch-agent-config"
+  type  = "String"
+  value = file("${path.module}/cloudwatch-agent-config.json")
+}
+
+# -------------------------
+# CloudWatch Dashboard
+# -------------------------
+resource "aws_cloudwatch_dashboard" "dashboard" {
+  dashboard_name = "${var.project_name}-dashboard"
+  dashboard_body = templatefile("${path.module}/cw-dashboard.json.tpl", {
+    instance_id = aws_instance.ml_instance.id,
+    region      = var.region
   })
 }
 
-data "aws_iam_policy_document" "ec2_s3_doc" {
-  statement {
-    actions = ["s3:GetObject", "s3:ListBucket", "s3:GetBucketLocation", "s3:PutObject"]
-    resources = [
-      aws_s3_bucket.model_bucket.arn,
-      "${aws_s3_bucket.model_bucket.arn}/*"
-    ]
-    effect = "Allow"
-  }
+# -------------------------
+# Alarms: high CPU & disk
+# -------------------------
+resource "aws_cloudwatch_metric_alarm" "high_cpu" {
+  alarm_name          = "${var.project_name}-HighCPU"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 300
+  statistic           = "Average"
+  threshold           = var.cpu_alarm_threshold
+  dimensions          = { InstanceId = aws_instance.ml_instance.id }
+  alarm_description   = "Alarm when EC2 CPU > ${var.cpu_alarm_threshold}%"
 }
 
-resource "aws_iam_policy" "ec2_s3_policy" {
-  name   = "${local.name_prefix}-s3-policy"
-  policy = data.aws_iam_policy_document.ec2_s3_doc.json
+resource "aws_cloudwatch_metric_alarm" "high_disk" {
+  alarm_name          = "${var.project_name}-HighDisk"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "DiskSpaceUtilization"
+  namespace           = "CWAgent"
+  period              = 300
+  statistic           = "Average"
+  threshold           = var.disk_alarm_threshold
+  dimensions          = { InstanceId = aws_instance.ml_instance.id, path = "/", filesystem = "root" }
+  alarm_description   = "Alarm when root disk > ${var.disk_alarm_threshold}% (CWAgent)"
 }
 
-resource "aws_iam_role_policy_attachment" "attach_s3" {
-  role       = aws_iam_role.ec2_role.name
-  policy_arn = aws_iam_policy.ec2_s3_policy.arn
-}
-
-resource "aws_iam_role_policy_attachment" "attach_ssm" {
-  role       = aws_iam_role.ec2_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-}
-
-resource "aws_iam_instance_profile" "ec2_profile" {
-  name = "${local.name_prefix}-instance-profile"
-  role = aws_iam_role.ec2_role.name
-}
-
-####################
-# Security Group for EC2 (public)
-####################
-resource "aws_security_group" "ec2_sg" {
-  name        = "${local.name_prefix}-sg"
-  description = "EC2 SG"
-  vpc_id      = aws_vpc.main.id
-
-  ingress {
-    description = "SSH from admin"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = [local.admin_cidr_final]
-  }
-
-  ingress {
-    description = "Backend port"
-    from_port   = var.backend_port
-    to_port     = var.backend_port
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    description = "HTTP"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    description = "HTTPS"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = { Name = "${local.name_prefix}-sg" }
-}
-
-####################
-# Cloud-init (local_file) -> user_data uses the content
-####################
-resource "local_file" "cloud_init_tpl" {
-  filename = "${path.module}/cloud_init.tpl"
-  content  = <<-EOT
-              #!/bin/bash
-              set -e
-              apt-get update -y
-              apt-get install -y git python3 python3-venv python3-pip awscli curl
-
-              HOME_DIR="/home/ubuntu"
-              cd $HOME_DIR
-
-              if [ ! -d "$HOME_DIR/ICU" ]; then
-                sudo -u ubuntu git clone ${var.github_repo} ICU || true
-              else
-                cd $HOME_DIR/ICU
-                sudo -u ubuntu git fetch --all || true
-                sudo -u ubuntu git reset --hard origin/main || true
-                sudo -u ubuntu git pull origin main || true
-              fi
-
-              cd $HOME_DIR/ICU/backend || exit 0
-              python3 -m venv venv || true
-              source venv/bin/activate
-              if [ -f requirements.txt ]; then
-                pip install --upgrade pip
-                pip install -r requirements.txt || true
-              fi
-
-              # Sync models into backend/models/
-              mkdir -p $HOME_DIR/ICU/backend/models
-              aws s3 sync s3://${aws_s3_bucket.model_bucket.bucket}/models/ $HOME_DIR/ICU/backend/models/ || true
-
-              # Create run script (FastAPI main:app)
-              cat > $HOME_DIR/run_backend.sh <<'RUNSH'
-              #!/bin/bash
-              set -e
-              cd /home/ubuntu/ICU/backend || exit 0
-              source venv/bin/activate
-              exec ${var.backend_start_cmd}
-              RUNSH
-              chmod +x $HOME_DIR/run_backend.sh
-              chown ubuntu:ubuntu $HOME_DIR/run_backend.sh
-
-              # systemd service
-              cat > /etc/systemd/system/ml-backend.service <<'SERVICE'
-              [Unit]
-              Description=ML Backend (FastAPI) service
-              After=network.target
-
-              [Service]
-              Type=simple
-              User=ubuntu
-              WorkingDirectory=/home/ubuntu/ICU/backend
-              ExecStart=/home/ubuntu/run_backend.sh
-              Restart=always
-              RestartSec=5
-
-              [Install]
-              WantedBy=multi-user.target
-              SERVICE
-
-              systemctl daemon-reload
-              systemctl enable ml-backend.service
-              systemctl start ml-backend.service
-
-              chown -R ubuntu:ubuntu $HOME_DIR/ICU || true
-              EOT
-}
-
-####################
-# EC2 in public subnet (public IP for debugging)
-####################
-resource "aws_instance" "ml_server" {
-  ami                         = data.aws_ami.ubuntu.id
-  instance_type               = var.instance_type
-  key_name                    = aws_key_pair.deployer.key_name
-  subnet_id                   = aws_subnet.public_a.id # public subnet so instance has public IP
-  vpc_security_group_ids      = [aws_security_group.ec2_sg.id]
-  iam_instance_profile        = aws_iam_instance_profile.ec2_profile.name
-  associate_public_ip_address = true # assign public IP (visible in console)
-
-  root_block_device {
-    volume_size = 30
-    volume_type = "gp3"
-  }
-
-  user_data = local_file.cloud_init_tpl.content
-
-  tags = {
-    Name = "${local.name_prefix}-ec2"
-  }
-}
-
-####################
-# Elastic IP for EC2 public IP (optional)
-####################
-resource "aws_eip" "ec2_eip" {
-  instance = aws_instance.ml_server.id
-  tags     = { Name = "${local.name_prefix}-eip" }
-}
-
-####################
-# NLB + target group + listener + attachment (NLB public)
-####################
-resource "aws_lb" "nlb" {
-  name               = "${local.name_prefix}-nlb"
-  internal           = false
-  load_balancer_type = "network"
-  subnet_mapping {
-    subnet_id = aws_subnet.public_a.id
-  }
-  subnet_mapping {
-    subnet_id = aws_subnet.public_b.id
-  }
-  tags = { Name = "${local.name_prefix}-nlb" }
-}
-
-resource "aws_lb_target_group" "tg" {
-  name        = "${local.name_prefix}-tg"
-  port        = var.backend_port
-  protocol    = "TCP"
-  vpc_id      = aws_vpc.main.id
-  target_type = "instance"
-
-  health_check {
-    protocol            = "TCP"
-    port                = var.backend_port
-    interval            = 30
-    healthy_threshold   = 2
-    unhealthy_threshold = 2
-  }
-  tags = { Name = "${local.name_prefix}-tg" }
-}
-
-resource "aws_lb_listener" "nlb_listener" {
-  load_balancer_arn = aws_lb.nlb.arn
-  port              = var.backend_port
-  protocol          = "TCP"
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.tg.arn
-  }
-}
-
-resource "aws_lb_target_group_attachment" "tg_attach" {
-  target_group_arn = aws_lb_target_group.tg.arn
-  target_id        = aws_instance.ml_server.id
-  port             = var.backend_port
-}
-
-####################
-# API Gateway (HTTP API v2) + VPC LINK -> NLB
-# JWT authorizer DISABLED
-####################
+# -------------------------
+# API Gateway (HTTP Proxy) — simple
+# -------------------------
 resource "aws_apigatewayv2_api" "http_api" {
-  name          = "${local.name_prefix}-http-api"
+  name          = "${var.project_name}-http-api"
   protocol_type = "HTTP"
 }
 
-# Health Lambda (public)
-resource "local_file" "health_lambda_py" {
-  filename = "${path.module}/health_lambda.py"
-  content  = <<-PY
-              def lambda_handler(event, context):
-                  return {
-                      "statusCode": 200,
-                      "headers": {"Content-Type": "application/json"},
-                      "body": '{"status":"ok"}'
-                  }
-              PY
-}
-
-data "archive_file" "health_zip" {
-  type        = "zip"
-  source_file = local_file.health_lambda_py.filename
-  output_path = "${path.module}/health_lambda.zip"
-}
-
-resource "aws_iam_role" "lambda_exec" {
-  name = "${local.name_prefix}-lambda-role"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect    = "Allow"
-      Principal = { Service = "lambda.amazonaws.com" }
-      Action    = "sts:AssumeRole"
-    }]
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "lambda_basic" {
-  role       = aws_iam_role.lambda_exec.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-}
-
-resource "aws_lambda_function" "health" {
-  filename         = data.archive_file.health_zip.output_path
-  function_name    = "${local.name_prefix}-health"
-  role             = aws_iam_role.lambda_exec.arn
-  handler          = "health_lambda.lambda_handler"
-  runtime          = "python3.9"
-  publish          = true
-  source_code_hash = data.archive_file.health_zip.output_base64sha256
-  timeout          = 5
-}
-
-resource "aws_apigatewayv2_integration" "health_integration" {
-  api_id                 = aws_apigatewayv2_api.http_api.id
-  integration_type       = "AWS_PROXY"
-  integration_method     = "POST"
-  integration_uri        = aws_lambda_function.health.invoke_arn
-  payload_format_version = "2.0"
-}
-
-resource "aws_lambda_permission" "apigw_invoke_health" {
-  statement_id  = "AllowAPIGatewayInvokeHealth"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.health.function_name
-  principal     = "apigateway.amazonaws.com"
-  source_arn    = "${aws_apigatewayv2_api.http_api.execution_arn}/*/*"
-}
-
-# VPC LINK to private subnet(s)
-resource "aws_apigatewayv2_vpc_link" "vpc_link" {
-  name               = "${local.name_prefix}-vpc-link"
-  security_group_ids = [aws_security_group.ec2_sg.id]
-  subnet_ids         = [aws_subnet.private.id]
-  tags               = { Name = "${local.name_prefix}-vpc-link" }
-}
-
-# Integration to NLB using listener ARN (required for VPC_LINK)
-resource "aws_apigatewayv2_integration" "nlb_integration" {
+resource "aws_apigatewayv2_integration" "http_integration" {
   api_id                 = aws_apigatewayv2_api.http_api.id
   integration_type       = "HTTP_PROXY"
   integration_method     = "ANY"
-  connection_type        = "VPC_LINK"
-  connection_id          = aws_apigatewayv2_vpc_link.vpc_link.id
-  integration_uri        = aws_lb_listener.nlb_listener.arn
+  integration_uri        = "http://${aws_instance.ml_instance.public_ip}:${var.backend_port}/"
   payload_format_version = "1.0"
 }
 
-# Protected proxy route -> NLB (no authorizer attached)
-resource "aws_apigatewayv2_route" "protected_route" {
+resource "aws_apigatewayv2_route" "any_route" {
   api_id    = aws_apigatewayv2_api.http_api.id
   route_key = "ANY /{proxy+}"
-  target    = "integrations/${aws_apigatewayv2_integration.nlb_integration.id}"
-  # authorizer_id and authorization_type intentionally omitted (JWT disabled)
+  target    = "integrations/${aws_apigatewayv2_integration.http_integration.id}"
 }
 
-# Health route (public)
-resource "aws_apigatewayv2_route" "health_route" {
-  api_id    = aws_apigatewayv2_api.http_api.id
-  route_key = "GET /health"
-  target    = "integrations/${aws_apigatewayv2_integration.health_integration.id}"
-}
-
-resource "aws_apigatewayv2_stage" "default" {
+resource "aws_apigatewayv2_stage" "default_stage" {
   api_id      = aws_apigatewayv2_api.http_api.id
   name        = "$default"
   auto_deploy = true
 }
 
-####################
-# VPC Endpoints (SSM + S3)
-####################
-# security group for endpoints
-resource "aws_security_group" "vpce_sg" {
-  name        = "${local.name_prefix}-vpce-sg"
-  description = "Security group for VPC interface endpoints (SSM, ssmmessages, ec2messages)"
-  vpc_id      = aws_vpc.main.id
+# -------------------------
+# Amazon Managed Grafana workspace
+# -------------------------
+# resource "aws_grafana_workspace" "grafana" {
+#   name                     = "${var.project_name}-grafana"
+#   authentication_providers = ["AWS_SSO"]
+#   account_access_type      = "CURRENT_ACCOUNT"
+#   description              = "Grafana workspace for ${var.project_name}"
+#   permission_type          = "SERVICE_MANAGED"
+# }
 
-  ingress {
-    description = "Allow HTTPS from VPC CIDR"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = [aws_vpc.main.cidr_block]
-  }
-
-  egress {
-    description = "All outbound"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = { Name = "${local.name_prefix}-vpce-sg" }
-}
-
-# private route table for private subnet
-resource "aws_route_table" "private_rt" {
-  vpc_id = aws_vpc.main.id
-  tags   = { Name = "${local.name_prefix}-private-rt" }
-}
-
-resource "aws_route_table_association" "private_rt_assoc" {
-  subnet_id      = aws_subnet.private.id
-  route_table_id = aws_route_table.private_rt.id
-}
-
-resource "aws_vpc_endpoint" "s3" {
-  vpc_id            = aws_vpc.main.id
-  service_name      = "com.amazonaws.${var.aws_region}.s3"
-  vpc_endpoint_type = "Gateway"
-  route_table_ids = [
-    aws_route_table.private_rt.id,
-    aws_route_table.public_rt.id,
-  ]
-  tags = { Name = "${local.name_prefix}-s3-endpoint" }
-}
-
-resource "aws_vpc_endpoint" "ssm" {
-  vpc_id              = aws_vpc.main.id
-  service_name        = "com.amazonaws.${var.aws_region}.ssm"
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = [aws_subnet.private.id]
-  security_group_ids  = [aws_security_group.vpce_sg.id]
-  private_dns_enabled = true
-  tags                = { Name = "${local.name_prefix}-ssm-endpoint" }
-}
-
-resource "aws_vpc_endpoint" "ssm_messages" {
-  vpc_id              = aws_vpc.main.id
-  service_name        = "com.amazonaws.${var.aws_region}.ssmmessages"
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = [aws_subnet.private.id]
-  security_group_ids  = [aws_security_group.vpce_sg.id]
-  private_dns_enabled = true
-  tags                = { Name = "${local.name_prefix}-ssm-messages-endpoint" }
-}
-
-resource "aws_vpc_endpoint" "ec2_messages" {
-  vpc_id              = aws_vpc.main.id
-  service_name        = "com.amazonaws.${var.aws_region}.ec2messages"
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = [aws_subnet.private.id]
-  security_group_ids  = [aws_security_group.vpce_sg.id]
-  private_dns_enabled = true
-  tags                = { Name = "${local.name_prefix}-ec2-messages-endpoint" }
-}
+# variable "create_grafana" {
+#   type    = bool
+#   default = false
+# }
