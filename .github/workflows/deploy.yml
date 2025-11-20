@@ -7,6 +7,7 @@ on:
       - "backend/**"
       - "scripts/**"
       - ".github/workflows/deploy.yml"
+  workflow_dispatch: {}
 
 jobs:
   deploy-via-ssm:
@@ -20,6 +21,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Install jq (required for CMD JSON creation)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
@@ -27,11 +33,16 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Debug env (verify S3 secret)
+      - name: Debug env (verify secrets)
         run: |
           echo "S3_BUCKET=${{ secrets.S3_BUCKET }}"
+          echo "EC2_INSTANCE_ID=${{ secrets.EC2_INSTANCE_ID }}"
           if [ -z "${{ secrets.S3_BUCKET }}" ]; then
             echo "ERROR: S3_BUCKET secret is missing!"
+            exit 1
+          fi
+          if [ -z "${{ secrets.EC2_INSTANCE_ID }}" ]; then
+            echo "ERROR: EC2_INSTANCE_ID secret is missing!"
             exit 1
           fi
 
@@ -44,10 +55,6 @@ jobs:
       - name: Get EC2 instance id (from secret)
         id: find_instance
         run: |
-          if [ -z "${{ secrets.EC2_INSTANCE_ID }}" ]; then
-            echo "ERROR: EC2_INSTANCE_ID not set in secrets!"
-            exit 1
-          fi
           echo "instance_id=${{ secrets.EC2_INSTANCE_ID }}" >> $GITHUB_OUTPUT
 
       - name: Run deploy.sh on EC2 via SSM
@@ -56,7 +63,6 @@ jobs:
           INSTANCE_ID: ${{ steps.find_instance.outputs.instance_id }}
           BUCKET: ${{ secrets.S3_BUCKET }}
         run: |
-          # Build JSON array of commands for AWS-RunShellScript
           CMD_JSON=$(jq -n --arg b "$BUCKET" '[
             "export S3_BUCKET=\($b)",
             "aws s3 cp s3://\($b)/scripts/deploy.sh /home/ubuntu/deploy.sh",
@@ -76,7 +82,6 @@ jobs:
 
           echo "Command ID: $CMD_ID"
 
-          # Poll until completion
           for i in $(seq 1 120); do
             STATUS=$(aws ssm list-command-invocations --command-id "$CMD_ID" --details --query "CommandInvocations[0].Status" --output text)
             echo "Status: $STATUS"
@@ -86,7 +91,6 @@ jobs:
             if [[ "$STATUS" =~ ^(Failed|Cancelled|TimedOut|Canceled)$ ]]; then
               echo "SSM command failed!"
               aws ssm list-command-invocations --command-id "$CMD_ID" --details
-              # fetch logs for debugging
               aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --query 'StandardOutputContent' --output text || true
               aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --query 'StandardErrorContent' --output text || true
               exit 3
