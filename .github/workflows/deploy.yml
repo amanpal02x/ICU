@@ -8,13 +8,8 @@ on:
 permissions:
   contents: read
 
-env:
-  AWS_REGION: ${{ secrets.AWS_REGION }}
-
 jobs:
-  # Common pre-check step implemented inside each job for clarity.
-  deploy-ssh:
-    if: ${{ secrets.EC2_SSH_PRIVATE_KEY != '' }} # run this job only when an SSH private key secret exists
+  deploy:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
@@ -28,10 +23,12 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Sync models to S3
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
           aws s3 sync backend/models s3://${{ secrets.S3_BUCKET_NAME }}/models --region $AWS_REGION || true
 
-      - name: Validate SSH-related secrets (fail fast with clear error)
+      - name: Validate EC2 secrets (fail fast if missing)
         run: |
           if [ -z "${{ secrets.EC2_HOST }}" ]; then
             echo "::error::Repository secret EC2_HOST is not set. Add it in Settings → Secrets & variables → Actions."
@@ -48,16 +45,6 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
 
-      - name: Verify connectivity (debug)
-        env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_USER: ${{ secrets.EC2_USER }}
-        run: |
-          echo "Testing SSH TCP connection to $EC2_HOST:22 (from runner)..."
-          timeout 10 bash -c "cat < /dev/null > /dev/tcp/$EC2_HOST/22" && echo "TCP 22 reachable" || echo "TCP 22 not reachable / timed out (check SG / public IP)"
-          echo "Attempt a quick 'ls' to ensure account exists and home dir is writable:"
-          ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} "ls -ld /home/appuser || ls -ld /home/${EC2_USER}" || true
-
       - name: Copy deploy script to EC2
         env:
           EC2_USER: ${{ secrets.EC2_USER }}
@@ -66,80 +53,14 @@ jobs:
           scp -o StrictHostKeyChecking=no .github/deploy/deploy.sh ${EC2_USER}@${EC2_HOST}:/home/appuser/deploy.sh
           ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} "chmod +x /home/appuser/deploy.sh"
 
-      - name: Run deploy script on EC2 (SSH)
+      - name: Run deploy script on EC2
         env:
           EC2_USER: ${{ secrets.EC2_USER }}
           EC2_HOST: ${{ secrets.EC2_HOST }}
-          SECRET_ARN: ${{ secrets.MONGO_SECRET_ARN }}
+          SECRET_ARN: ${{ secrets.MONGO_SECRET_ARN }} # optional: override in repo secrets
+          AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
           ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} "bash /home/appuser/deploy.sh ${SECRET_ARN:-ml-mongodb-uri}"
 
-      - name: Cleanup (noop)
-        run: echo "SSH deploy finished."
-
-  deploy-ssm:
-    if: ${{ secrets.EC2_SSH_PRIVATE_KEY == '' && secrets.EC2_INSTANCE_ID != '' }} # fallback to SSM if SSH key missing
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Sync models to S3
-        run: |
-          aws s3 sync backend/models s3://${{ secrets.S3_BUCKET_NAME }}/models --region $AWS_REGION || true
-
-      - name: Upload deploy script to S3 (temporary)
-        env:
-          S3_BUCKET: ${{ secrets.S3_BUCKET_NAME }}
-        run: |
-          KEY="deploy/deploy-$(date +%s).sh"
-          aws s3 cp .github/deploy/deploy.sh s3://$S3_BUCKET/$KEY --region $AWS_REGION
-          echo "UPLOAD_KEY=$KEY" >> $GITHUB_ENV
-
-      - name: Run deploy script on EC2 via SSM (no SSH required)
-        env:
-          INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
-          S3_BUCKET: ${{ secrets.S3_BUCKET_NAME }}
-          UPLOAD_KEY: ${{ env.UPLOAD_KEY }}
-          SECRET_ARN: ${{ secrets.MONGO_SECRET_ARN }}
-        run: |
-          if [ -z "$INSTANCE_ID" ]; then
-            echo "::error::EC2 instance id (secrets.EC2_INSTANCE_ID) is not set."
-            exit 1
-          fi
-          S3_URI="s3://$S3_BUCKET/$UPLOAD_KEY"
-          CMD="aws s3 cp \"$S3_URI\" /home/appuser/deploy.sh --region $AWS_REGION && chmod +x /home/appuser/deploy.sh && bash /home/appuser/deploy.sh ${SECRET_ARN:-ml-mongodb-uri}"
-          echo "Sending SSM command to $INSTANCE_ID to fetch and run script from $S3_URI..."
-          CMD_ID=$(aws ssm send-command \
-            --instance-ids "$INSTANCE_ID" \
-            --document-name "AWS-RunShellScript" \
-            --comment "Deploy ICU ML backend" \
-            --parameters commands="$CMD" \
-            --timeout-seconds 600 \
-            --region $AWS_REGION \
-            --query "Command.CommandId" --output text)
-          echo "SSM CommandId: $CMD_ID"
-          echo "Waiting for command to finish..."
-          aws ssm wait command-executed --instance-id "$INSTANCE_ID" --command-id "$CMD_ID" --region $AWS_REGION
-          echo "Invocation result:"
-          aws ssm get-command-invocation --instance-id "$INSTANCE_ID" --command-id "$CMD_ID" --region $AWS_REGION --output json
-
-      - name: Cleanup uploaded script (best-effort)
-        if: always()
-        env:
-          S3_BUCKET: ${{ secrets.S3_BUCKET_NAME }}
-          UPLOAD_KEY: ${{ env.UPLOAD_KEY }}
-        run: |
-          if [ -n "$UPLOAD_KEY" ]; then
-            aws s3 rm s3://$S3_BUCKET/$UPLOAD_KEY --region $AWS_REGION || true
-          fi
-
-      - name: Finished
-        run: echo "SSM deploy finished."
+      - name: Cleanup (no secrets left on runner)
+        run: echo "Done"
