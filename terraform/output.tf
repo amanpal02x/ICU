@@ -1,21 +1,25 @@
-output "nlb_dns_name" {
-  value       = aws_lb.nlb.dns_name
-  description = "Network Load Balancer DNS (public)"
-}
+############################################################
+# outputs.tf
+############################################################
 
 output "api_gateway_invoke_url" {
   value       = aws_apigatewayv2_stage.default.invoke_url
-  description = "API Gateway public HTTPS endpoint"
+  description = "Public HTTPS API endpoint"
+}
+
+output "nlb_dns_name" {
+  value       = aws_lb.nlb.dns_name
+  description = "Network Load Balancer DNS"
 }
 
 output "s3_bucket" {
   value       = aws_s3_bucket.model_bucket.bucket
-  description = "S3 bucket name for models."
+  description = "S3 bucket storing your ML models"
 }
 
 output "ec2_private_ip" {
   value       = aws_instance.ml_server.private_ip
-  description = "Private IP of the EC2 instance (in VPC)."
+  description = "Private IP of the EC2 backend"
 }
 
 output "ec2_instance_id" {
@@ -23,19 +27,11 @@ output "ec2_instance_id" {
   description = "EC2 instance ID"
 }
 
-output "uploaded_image_path" {
-  value       = "/mnt/data/d64af07a-14d8-4bf0-a723-b88a162c759c.png"
-  description = "Uploaded screenshot path"
-}
-
-output "github_actions_access_key_id" {
-  value     = aws_iam_access_key.github_actions_key.id
+output "generated_private_key" {
+  value     = tls_private_key.generated.private_key_pem
   sensitive = true
 }
 
-output "github_actions_secret" {
-  value     = aws_iam_access_key.github_actions_key.secret
-  sensitive = true
+output "admin_cidr_final" {
+  value = local.admin_cidr_final
 }
-
-

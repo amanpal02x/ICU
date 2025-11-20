@@ -1,9 +1,16 @@
 ############################################################
-# main.tf - Private EC2 behind NLB + API Gateway (VPC LINK)
-# JWT authorizer DISABLED (for now)
-# Patched: automatic admin CIDR detection (auto -> checkip.amazonaws.com)
-# All var.admin_cidr occurrences replaced with local.admin_cidr_final
-# Uploaded screenshot reference: /mnt/data/d64af07a-14d8-4bf0-a723-b88a162c759c.png
+# main.tf - Full merged Terraform configuration
+# - Private EC2 (Ubuntu m7i-flex.large) in VPC
+# - S3 bucket for ML models (initial upload if present)
+# - IAM role for EC2 with S3 + SSM
+# - NLB fronting EC2 (target group)
+# - API Gateway (HTTP API v2) with VPC LINK -> NLB
+# - VPC, subnets, route tables, NACL, security groups
+# - VPC endpoints for SSM (interface) and S3 (gateway)
+# - Local file cloud-init to prepare instance, systemd service
+# - Outputs for API Gateway, S3, EC2, NLB
+# NOTE: this file expects variables to be declared in variables.tf
+# Uploaded screenshot path (for reference): /mnt/data/d0105f69-d89a-424d-ab91-9c75ef1d1cf7.png
 ############################################################
 
 terraform {
@@ -26,15 +33,12 @@ locals {
   bucket_name          = "${var.s3_bucket_prefix}-${substr(var.aws_account_id, 0, 6)}"
   initial_model_path   = "${path.module}/initial_model/model.pkl"
   initial_model_exists = fileexists(local.initial_model_path)
-
-  # admin CIDR auto-detection (uses data.http.my_public_ip)
-  admin_cidr_auto  = trimspace(data.http.my_public_ip.response_body) != "" ? "${trimspace(data.http.my_public_ip.response_body)}/32" : ""
-  admin_cidr_final = (var.admin_cidr != null && var.admin_cidr != "") ? var.admin_cidr : local.admin_cidr_auto
 }
 
 ####################
 # Data sources
 ####################
+
 data "aws_availability_zones" "available" {}
 
 data "aws_ami" "ubuntu" {
@@ -56,6 +60,11 @@ data "http" "my_public_ip" {
   request_headers = {
     "User-Agent" = "terraform"
   }
+}
+
+locals {
+  admin_cidr_auto  = trimspace(data.http.my_public_ip.response_body) != "" ? "${trimspace(data.http.my_public_ip.response_body)}/32" : ""
+  admin_cidr_final = (var.admin_cidr != null && var.admin_cidr != "") ? var.admin_cidr : local.admin_cidr_auto
 }
 
 ####################
@@ -164,8 +173,7 @@ resource "aws_network_acl_association" "public_b_assoc" {
   network_acl_id = aws_network_acl.public_nacl.id
 }
 
-####################
-# S3 bucket + conditional initial model upload (aws_s3_object)
+# S3 bucket + conditional initial model upload
 ####################
 resource "aws_s3_bucket" "model_bucket" {
   bucket        = local.bucket_name
@@ -517,4 +525,84 @@ resource "aws_apigatewayv2_stage" "default" {
   api_id      = aws_apigatewayv2_api.http_api.id
   name        = "$default"
   auto_deploy = true
+}
+
+####################
+# VPC Endpoints (SSM + S3)
+####################
+# security group for endpoints
+resource "aws_security_group" "vpce_sg" {
+  name        = "${local.name_prefix}-vpce-sg"
+  description = "Security group for VPC interface endpoints (SSM, ssmmessages, ec2messages)"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description = "Allow HTTPS from VPC CIDR"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = [aws_vpc.main.cidr_block]
+  }
+
+  egress {
+    description = "All outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = { Name = "${local.name_prefix}-vpce-sg" }
+}
+
+# private route table for private subnet
+resource "aws_route_table" "private_rt" {
+  vpc_id = aws_vpc.main.id
+  tags   = { Name = "${local.name_prefix}-private-rt" }
+}
+
+resource "aws_route_table_association" "private_rt_assoc" {
+  subnet_id      = aws_subnet.private.id
+  route_table_id = aws_route_table.private_rt.id
+}
+
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.${var.aws_region}.s3"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids = [
+    aws_route_table.private_rt.id,
+    aws_route_table.public_rt.id,
+  ]
+  tags = { Name = "${local.name_prefix}-s3-endpoint" }
+}
+
+resource "aws_vpc_endpoint" "ssm" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.ssm"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = [aws_subnet.private.id]
+  security_group_ids  = [aws_security_group.vpce_sg.id]
+  private_dns_enabled = true
+  tags                = { Name = "${local.name_prefix}-ssm-endpoint" }
+}
+
+resource "aws_vpc_endpoint" "ssm_messages" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.ssmmessages"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = [aws_subnet.private.id]
+  security_group_ids  = [aws_security_group.vpce_sg.id]
+  private_dns_enabled = true
+  tags                = { Name = "${local.name_prefix}-ssm-messages-endpoint" }
+}
+
+resource "aws_vpc_endpoint" "ec2_messages" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.ec2messages"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = [aws_subnet.private.id]
+  security_group_ids  = [aws_security_group.vpce_sg.id]
+  private_dns_enabled = true
+  tags                = { Name = "${local.name_prefix}-ec2-messages-endpoint" }
 }
