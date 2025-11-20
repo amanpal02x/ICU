@@ -27,3 +27,15 @@ output "uploaded_image_path" {
   value       = "/mnt/data/d64af07a-14d8-4bf0-a723-b88a162c759c.png"
   description = "Uploaded screenshot path"
 }
+
+output "github_actions_access_key_id" {
+  value     = aws_iam_access_key.github_actions_key.id
+  sensitive = true
+}
+
+output "github_actions_secret" {
+  value     = aws_iam_access_key.github_actions_key.secret
+  sensitive = true
+}
+
+
