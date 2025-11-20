@@ -1,66 +1,80 @@
-############################################################
-# variables.tf
-############################################################
-
-variable "aws_region" {
-  description = "AWS region to deploy into"
-  type        = string
-  default     = "us-west-2"
-}
-
-variable "aws_account_id" {
-  description = "Your AWS account ID"
-  type        = string
-}
-
 variable "project_name" {
-  description = "Name prefix for all resources"
-  type        = string
-  default     = "icu-backend"
+  type    = string
+  default = "icu-monitor"
 }
 
-variable "s3_bucket_prefix" {
-  description = "Prefix used for S3 bucket naming"
-  type        = string
-  default     = "ml-model-icu"
-}
-
-variable "github_repo" {
-  description = "URL of your GitHub repo (used by cloud-init to clone/pull)"
-  type        = string
+variable "region" {
+  type    = string
+  default = "us-east-2"
 }
 
 variable "instance_type" {
-  description = "EC2 instance type"
-  type        = string
-  default     = "m7i-flex.large"
+  type    = string
+  default = "m7i-flex.large"
 }
 
 variable "backend_port" {
-  description = "Port your FastAPI backend listens on"
-  type        = number
-  default     = 8000
+  type    = number
+  default = 8000
 }
 
-variable "backend_start_cmd" {
-  description = "Command to start the backend inside the repo (executed by run_backend.sh)"
-  type        = string
-  default     = "venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000"
+variable "s3_bucket_name" {
+  type    = string
+  default = "icu-model"
+}
+
+variable "mongodb_uri" {
+  type      = string
+  sensitive = true
+  default   = "mongodb+srv://aman9118x4_db_user:aman2244@icu.7i4jmmj.mongodb.net/?appName=ICU"
 }
 
 variable "ssh_public_key" {
-  description = "SSH public key (contents of ~/.ssh/id_rsa.pub). Required to SSH into EC2."
-  type        = string
-  default     = ""
+  type = string
 }
 
-variable "admin_cidr" {
-  description = "CIDR allowed to SSH into EC2 (set to e.g. x.x.x.x/32). If empty, Terraform will auto-detect your current IP at plan-time."
-  type        = string
-  default     = ""
+variable "ssh_allowed_cidr" {
+  type    = string
+  default = "203.0.113.5/32"
 }
-variable "tags" {
-  description = "Additional tags to apply to all resources"
-  type        = map(string)
-  default     = {}
+
+variable "github_repo_url" {
+  type    = string
+  default = "https://github.com/amanpal02x/ICU"
+}
+
+variable "github_branch" {
+  type    = string
+  default = "main"
+}
+
+variable "log_retention_days" {
+  type    = number
+  default = 14
+}
+
+variable "cpu_alarm_threshold" {
+  type    = number
+  default = 80
+}
+
+variable "disk_alarm_threshold" {
+  type    = number
+  default = 80
+}
+
+variable "api_gateway_cidrs" {
+  type    = list(string)
+  default = ["0.0.0.0/0"]
+}
+
+variable "cwa_zip" {
+  description = "S3 object key or filename for the CloudWatch Agent zip that user-data will download/install"
+  type        = string
+  default     = "cwa-agent.zip" # change as appropriate, or omit default to force explicit value
+}
+
+variable "subnet_id" {
+  description = "Subnet id to launch EC2 into (example: subnet-0abcd1234efgh5678)"
+  type        = string
 }

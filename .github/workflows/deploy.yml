@@ -1,154 +1,41 @@
-name: Deploy via SSM, Upload Models & Test
+name: Deploy ICU ML Backend (models + server)
 
 on:
   push:
-    branches: [main]
-    paths:
-      - "backend/**"
-      - "scripts/**"
-      - ".github/workflows/deploy.yml"
-  workflow_dispatch: {}
+    branches:
+      - main
 
 jobs:
-  deploy-via-ssm:
+  deploy:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Install jq (required for CMD JSON creation)
+      - name: Install AWS CLI
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y jq
+          sudo apt update
+          sudo apt -y install awscli
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Debug env (verify secrets)
-        run: |
-          echo "S3_BUCKET=${{ secrets.S3_BUCKET }}"
-          echo "EC2_INSTANCE_ID=${{ secrets.EC2_INSTANCE_ID }}"
-          if [ -z "${{ secrets.S3_BUCKET }}" ]; then
-            echo "ERROR: S3_BUCKET secret is missing!"
-            exit 1
-          fi
-          if [ -z "${{ secrets.EC2_INSTANCE_ID }}" ]; then
-            echo "ERROR: EC2_INSTANCE_ID secret is missing!"
-            exit 1
-          fi
-
-      - name: Upload deploy script to S3
-        run: |
-          BUCKET="${{ secrets.S3_BUCKET }}"
-          echo "Uploading deploy.sh to s3://${BUCKET}/scripts/deploy.sh"
-          aws s3 cp scripts/deploy.sh "s3://${BUCKET}/scripts/deploy.sh" --acl private
-
-      - name: Get EC2 instance id (from secret)
-        id: find_instance
-        run: |
-          echo "instance_id=${{ secrets.EC2_INSTANCE_ID }}" >> $GITHUB_OUTPUT
-
-      - name: Run deploy.sh on EC2 via SSM
-        id: run_cmd
+      - name: Sync models to S3
         env:
-          INSTANCE_ID: ${{ steps.find_instance.outputs.instance_id }}
-          BUCKET: ${{ secrets.S3_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
-          CMD_JSON=$(jq -n --arg b "$BUCKET" '[
-            "export S3_BUCKET=\($b)",
-            "aws s3 cp s3://\($b)/scripts/deploy.sh /home/ubuntu/deploy.sh",
-            "chmod +x /home/ubuntu/deploy.sh",
-            "/home/ubuntu/deploy.sh"
-          ]')
+          aws s3 sync backend/models s3://${{ secrets.S3_BUCKET_NAME }}/models --region ${ { secrets.AWS_REGION } } || true
 
-          echo "Sending deploy command to instance $INSTANCE_ID (bucket=$BUCKET)"
-
-          CMD_ID=$(aws ssm send-command \
-            --instance-ids "$INSTANCE_ID" \
-            --document-name "AWS-RunShellScript" \
-            --comment "CI deploy" \
-            --parameters commands="$CMD_JSON" \
-            --timeout-seconds 1200 \
-            --query "Command.CommandId" --output text)
-
-          echo "Command ID: $CMD_ID"
-
-          for i in $(seq 1 120); do
-            STATUS=$(aws ssm list-command-invocations --command-id "$CMD_ID" --details --query "CommandInvocations[0].Status" --output text)
-            echo "Status: $STATUS"
-            if [ "$STATUS" = "Success" ]; then
-              exit 0
-            fi
-            if [[ "$STATUS" =~ ^(Failed|Cancelled|TimedOut|Canceled)$ ]]; then
-              echo "SSM command failed!"
-              aws ssm list-command-invocations --command-id "$CMD_ID" --details
-              aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --query 'StandardOutputContent' --output text || true
-              aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --query 'StandardErrorContent' --output text || true
-              exit 3
-            fi
-            sleep 5
-          done
-
-          echo "Timed out waiting for SSM command"
-          exit 4
-
-  upload-models:
-    needs: deploy-via-ssm
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Detect model changes
-        id: changed
+      - name: Setup SSH key
         run: |
-          FILES=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} || true)
-          echo "changed=$FILES"
-          if echo "$FILES" | grep -E '^backend/models/' >/dev/null 2>&1; then
-            echo "models_changed=true" >> $GITHUB_OUTPUT
-          else
-            echo "models_changed=false" >> $GITHUB_OUTPUT
-          fi
+          echo "${{ secrets.EC2_PRIVATE_KEY }}" > private_key.pem
+          chmod 600 private_key.pem
 
-      - name: Configure AWS credentials
-        if: steps.changed.outputs.models_changed == 'true'
-        uses: aws-actions/configure-aws-credentials@v2
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Upload models to S3
-        if: steps.changed.outputs.models_changed == 'true'
-        run: |
-          BUCKET="${{ secrets.S3_BUCKET }}"
-          echo "Uploading backend/models → s3://${BUCKET}/models/"
-          aws s3 cp --recursive backend/models/ "s3://${BUCKET}/models/" || true
-
-  test:
-    needs: [deploy-via-ssm, upload-models]
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Run API tests
+      - name: Run deploy script on EC2
         env:
-          API_URL: ${{ secrets.API_GATEWAY_URL }}
-          API_TEST_TOKEN: ${{ secrets.API_TEST_TOKEN }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
         run: |
-          chmod +x scripts/test_api.sh
-          ./scripts/test_api.sh "$API_URL" "$API_TEST_TOKEN"
+          scp -o StrictHostKeyChecking=no -i private_key.pem .github/deploy/deploy.sh $EC2_USER@$EC2_HOST:/home/appuser/deploy.sh
+          ssh -o StrictHostKeyChecking=no -i private_key.pem $EC2_USER@$EC2_HOST 'bash /home/appuser/deploy.sh'
+
+      - name: Cleanup
+        run: rm -f private_key.pem

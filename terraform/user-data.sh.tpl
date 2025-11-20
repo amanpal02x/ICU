@@ -1,0 +1,96 @@
+#!/bin/bash
+set -e
+exec > /var/log/user-data.log 2>&1
+
+# Update + packages
+apt-get update -y
+DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-pip python3-venv git nginx unzip awscli jq
+
+# Install CloudWatch agent (Debian)
+CWA_ZIP="/tmp/amazon-cloudwatch-agent.deb"
+apt-get install -y curl
+curl -s -L -o ${CWA_ZIP} https://s3.${region}.amazonaws.com/amazoncloudwatch-agent-${region}/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb || true
+dpkg -i ${CWA_ZIP} || apt-get -f install -y
+
+# Fetch MongoDB secret from Secrets Manager and write .env
+mkdir -p /home/appuser
+chown -R 1000:1000 /home/appuser || true
+
+project_name = "icu-monitor"
+MONGO_URI    = aws_secretsmanager_secret.mongodb.arn
+
+
+# Create app user
+id -u appuser >/dev/null 2>&1 || useradd -m -s /bin/bash appuser
+
+# clone repo
+if [ ! -d /home/appuser/backend ]; then
+  sudo -u appuser git clone "${repo_url}" /home/appuser/backend
+else
+  sudo -u appuser git -C /home/appuser/backend pull origin ${branch} || true
+fi
+
+# Get MongoDB URI from Secrets Manager and write .env
+MONGO_URI=$(aws secretsmanager get-secret-value --secret-id ${secret_arn} --region ${region} --query SecretString --output text || true)
+if [ -n "${MONGO_URI}" ]; then
+  echo "MONGODB_URL=${MONGO_URI}" > /home/appuser/backend/.env
+  chown appuser:appuser /home/appuser/backend/.env
+fi
+
+# Python venv + install
+cd /home/appuser/backend
+sudo -u appuser python3 -m venv venv
+sudo -u appuser /home/appuser/backend/venv/bin/pip install --upgrade pip
+sudo -u appuser /home/appuser/backend/venv/bin/pip install -r requirements.txt
+
+# sync models from S3
+aws s3 sync s3://${s3_bucket}/models /home/appuser/backend/models --region ${region} || true
+chown -R appuser:appuser /home/appuser/backend/models
+
+# configure CloudWatch agent using SSM param (if available)
+if [ -f /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl ]; then
+  # try to download config from SSM Parameter (if created by TF)
+  aws ssm get-parameter --name "/${project_name}/cloudwatch-agent-config" --region ${region} --query Parameter.Value --output text > /tmp/cw-config.json || true
+  if [ -s /tmp/cw-config.json ]; then
+    /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/tmp/cw-config.json -s || true
+  fi
+fi
+
+# systemd service
+cat > /etc/systemd/system/ml-backend.service <<'EOF'
+[Unit]
+Description=ICU ML Backend
+After=network.target
+
+[Service]
+User=appuser
+WorkingDirectory=/home/appuser/backend
+ExecStart=/home/appuser/backend/venv/bin/uvicorn backend.main:app --host 0.0.0.0 --port ${backend_port} --workers 1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable ml-backend
+systemctl start ml-backend
+
+# nginx reverse proxy
+cat > /etc/nginx/sites-available/ml-backend <<'NGX'
+server {
+  listen 80;
+  server_name _;
+  location / {
+    proxy_pass http://127.0.0.1:${backend_port};
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  }
+}
+NGX
+
+ln -sf /etc/nginx/sites-available/ml-backend /etc/nginx/sites-enabled/ml-backend
+rm -f /etc/nginx/sites-enabled/default
+systemctl restart nginx
