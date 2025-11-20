@@ -5,37 +5,50 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install AWS CLI
-        run: |
-          sudo apt update
-          sudo apt -y install awscli
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Sync models to S3
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
-          aws s3 sync backend/models s3://${{ secrets.S3_BUCKET_NAME }}/models --region ${ { secrets.AWS_REGION } } || true
+          aws s3 sync backend/models s3://${{ secrets.S3_BUCKET_NAME }}/models --region $AWS_REGION || true
 
-      - name: Setup SSH key
+      - name: Start SSH agent and load key
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+
+      - name: Copy deploy script to EC2
+        env:
+          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
         run: |
-          echo "${{ secrets.EC2_PRIVATE_KEY }}" > private_key.pem
-          chmod 600 private_key.pem
+          scp -o StrictHostKeyChecking=no .github/deploy/deploy.sh $EC2_USER@$EC2_HOST:/home/appuser/deploy.sh
+          ssh -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST "chmod +x /home/appuser/deploy.sh"
 
       - name: Run deploy script on EC2
         env:
           EC2_USER: ${{ secrets.EC2_USER }}
           EC2_HOST: ${{ secrets.EC2_HOST }}
+          SECRET_ARN: ${{ secrets.MONGO_SECRET_ARN }} # optional: if you want to pass secret id
+          AWS_REGION: ${{ secrets.AWS_REGION }}
         run: |
-          scp -o StrictHostKeyChecking=no -i private_key.pem .github/deploy/deploy.sh $EC2_USER@$EC2_HOST:/home/appuser/deploy.sh
-          ssh -o StrictHostKeyChecking=no -i private_key.pem $EC2_USER@$EC2_HOST 'bash /home/appuser/deploy.sh'
+          ssh -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST "bash /home/appuser/deploy.sh ${SECRET_ARN:-ml-mongodb-uri}"
 
-      - name: Cleanup
-        run: rm -f private_key.pem
+      - name: Cleanup (no secrets left on runner)
+        run: echo "Done"
