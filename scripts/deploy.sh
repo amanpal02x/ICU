@@ -139,3 +139,14 @@ fi
 
 log "Deploy script finished at $(date)"
 exit 0
+- name: Debug AWS identity & instance info
+  run: |
+    echo "Caller identity:"
+    aws sts get-caller-identity || true
+    echo "Region: ${{ secrets.AWS_REGION }}"
+    echo "EC2_INSTANCE_ID secret: ${{ secrets.EC2_INSTANCE_ID }}"
+    echo "Describe instance:"
+    aws ec2 describe-instances --instance-ids "${{ secrets.EC2_INSTANCE_ID }}" --region "${{ secrets.AWS_REGION }}" || true
+    echo "SSM instance list (matching id):"
+    aws ssm describe-instance-information --region "${{ secrets.AWS_REGION }}" \
+      --query "InstanceInformationList[?InstanceId=='${{ secrets.EC2_INSTANCE_ID }}']" || true
