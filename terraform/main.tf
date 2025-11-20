@@ -2,6 +2,8 @@ terraform {
   required_providers {
     aws      = { source = "hashicorp/aws", version = ">= 4.0" }
     template = { source = "hashicorp/template", version = ">= 2.0" }
+    tls      = { source = "hashicorp/tls", version = ">= 4.0" }
+    local    = { source = "hashicorp/local", version = ">= 2.0" }
   }
   required_version = ">= 1.2.0"
 }
@@ -9,6 +11,26 @@ terraform {
 provider "aws" {
   region = var.region
 }
+
+# -------------------------
+# Generate SSH keypair (local) and upload public key to AWS
+# -------------------------
+resource "tls_private_key" "deployer" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+resource "aws_key_pair" "deployer_key" {
+  key_name   = "${var.project_name}-key"
+  public_key = tls_private_key.deployer.public_key_openssh
+}
+
+resource "local_file" "deployer_private_key" {
+  content         = tls_private_key.deployer.private_key_pem
+  filename        = "${path.module}/deployer_id_rsa.pem"
+  file_permission = "0600"
+}
+
 # -------------------------
 # S3 bucket for models
 # -------------------------
@@ -38,6 +60,18 @@ data "aws_secretsmanager_secret_version" "mongodb" {
 # -------------------------
 data "aws_vpc" "default" { default = true }
 
+# If user didn't supply a subnet, pick one from the default VPC
+data "aws_subnets" "default_vpc_subnets" {
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.default.id]
+  }
+}
+
+locals {
+  selected_subnet_id = length(var.subnet_id) > 0 ? var.subnet_id : element(data.aws_subnets.default_vpc_subnets.ids, 0)
+}
+
 # -------------------------
 # IAM role & instance profile for EC2
 # -------------------------
@@ -56,7 +90,8 @@ resource "aws_iam_policy" "ec2_policy" {
     Statement = [
       { Effect = "Allow", Action = ["s3:GetObject", "s3:ListBucket"], Resource = [aws_s3_bucket.model_bucket.arn, "${aws_s3_bucket.model_bucket.arn}/*"] },
       { Effect = "Allow", Action = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"], Resource = [aws_secretsmanager_secret.mongodb.arn] },
-      { Effect = "Allow", Action = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"], Resource = ["*"] }
+      { Effect = "Allow", Action = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"], Resource = ["*"] },
+      { Effect = "Allow", Action = ["ssm:SendCommand", "ssm:GetCommandInvocation"], Resource = ["*"] } # optional: SSM usage
     ]
   })
 }
@@ -78,15 +113,16 @@ resource "aws_security_group" "ml_backend_sg" {
   name   = "${var.project_name}-sg"
   vpc_id = data.aws_vpc.default.id
 
-  # SSH — only from your IP
+  # SSH — only from your IP (configured via var.ssh_allowed_cidr)
   ingress {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
     cidr_blocks = [var.ssh_allowed_cidr]
+    description = "SSH from allowed CIDR"
   }
 
-  # Backend port (only API Gateway allowed) — use 0.0.0.0/0 as placeholder if you need testing
+  # Backend port (only API Gateway allowed)
   ingress {
     from_port   = var.backend_port
     to_port     = var.backend_port
@@ -124,16 +160,10 @@ data "aws_ami" "ubuntu" {
   }
 }
 
-
-resource "aws_key_pair" "deployer_key" {
-  key_name   = "${var.project_name}-key"
-  public_key = var.ssh_public_key
-}
-
 resource "aws_instance" "ml_instance" {
   ami                         = data.aws_ami.ubuntu.id
   instance_type               = var.instance_type
-  subnet_id                   = var.subnet_id
+  subnet_id                   = local.selected_subnet_id
   vpc_security_group_ids      = [aws_security_group.ml_backend_sg.id]
   key_name                    = aws_key_pair.deployer_key.key_name
   iam_instance_profile        = aws_iam_instance_profile.ec2_profile.name
@@ -151,11 +181,13 @@ resource "aws_instance" "ml_instance" {
     MONGO_URI    = data.aws_secretsmanager_secret_version.mongodb.secret_string
   })
 
-
-
-
-
   tags = { Name = "${var.project_name}-ml-instance" }
+}
+
+# Attach Elastic IP for a stable public IP
+resource "aws_eip" "ml_eip" {
+  instance   = aws_instance.ml_instance.id
+  depends_on = [aws_instance.ml_instance]
 }
 
 # -------------------------
@@ -242,19 +274,3 @@ resource "aws_apigatewayv2_stage" "default_stage" {
   name        = "$default"
   auto_deploy = true
 }
-
-# -------------------------
-# Amazon Managed Grafana workspace
-# -------------------------
-# resource "aws_grafana_workspace" "grafana" {
-#   name                     = "${var.project_name}-grafana"
-#   authentication_providers = ["AWS_SSO"]
-#   account_access_type      = "CURRENT_ACCOUNT"
-#   description              = "Grafana workspace for ${var.project_name}"
-#   permission_type          = "SERVICE_MANAGED"
-# }
-
-# variable "create_grafana" {
-#   type    = bool
-#   default = false
-# }
