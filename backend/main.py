@@ -94,7 +94,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://icu-ruby.vercel.app",
-        "https://icu-git-main-aman-pals-projects-57314315.vercel.app",
+        "https://b16mphiah2.execute-api.us-east-2.amazonaws.com/prod",
+        "https://main.d1xdxeg1kl0vq.amplifyapp.com"
         "https://icu-1-r21u.onrender.com",
         "http://localhost:8080",
     ],
@@ -122,10 +123,9 @@ async def health_check():
         "timestamp": _now_iso(),
         "cors_origins": [
             "https://icu-ruby.vercel.app",
-            "https://icu-git-main-aman-pals-projects-57314315.vercel.app",
+            "https://b16mphiah2.execute-api.us-east-2.amazonaws.com/prod",
             "https://icu-1-r21u.onrender.com",
-            "https://main.d1wagczisbb966.amplifyapp.com",
-            "https://xpvmw0sxz2.execute-api.us-east-2.amazonaws.com",
+            "https://main.d1xdxeg1kl0vq.amplifyapp.com"
             "http://localhost:8080",
         ]
     }
