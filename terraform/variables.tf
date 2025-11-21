@@ -29,15 +29,11 @@ variable "mongodb_uri" {
   default   = "mongodb+srv://aman9118x4_db_user:aman2244@icu.7i4jmmj.mongodb.net/?appName=ICU"
 }
 
-# If you want Terraform to use a pre-existing public key instead of auto-generating one,
-# set this to the public key text. Otherwise leave empty (we now auto-generate a keypair).
 variable "ssh_public_key" {
   type    = string
-  default = "" # leave empty to use the TLS-generated key in main.tf
+  default = "" # leave empty to auto-generate a keypair
 }
 
-# CIDR allowed for SSH. For initial testing you can set "0.0.0.0/0" but
-# for safety replace with your IP in CIDR form (e.g. "203.0.113.5/32").
 variable "ssh_allowed_cidr" {
   type    = string
   default = "203.0.113.5/32"
@@ -79,9 +75,8 @@ variable "cwa_zip" {
   default     = "cwa-agent.zip"
 }
 
-# Make subnet optional (main.tf will pick a subnet from the default VPC if unset)
 variable "subnet_id" {
-  description = "Subnet id to launch EC2 into (example: subnet-0abcd1234efgh5678). Leave empty to auto-select."
+  description = "Subnet id to launch EC2 into. Leave empty to auto-select."
   type        = string
   default     = ""
 }
