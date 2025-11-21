@@ -22,22 +22,30 @@ jobs:
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            echo "🔄 Pulling latest code..."
+            set -e  # Exit immediately if a command fails
+
             cd /opt/app/ICU
+
+            echo "🔄 Pulling latest code..."
             git reset --hard
             git clean -fd
             git fetch origin main
             git checkout main
             git pull origin main
 
+            echo "📦 Creating/updating virtual environment..."
+            if [ ! -d "venv" ]; then
+                python3 -m venv venv
+            fi
+
             echo "📦 Activating virtual environment and installing dependencies..."
             source venv/bin/activate
             pip install --upgrade pip
             pip install -r backend/requirements.txt
 
-            echo "🔧 Restarting ICU systemd service..."
+            echo "🔄 Restarting ICU service..."
             sudo systemctl daemon-reload
-            sudo systemctl restart icu
             sudo systemctl enable icu
+            sudo systemctl restart icu
 
             echo "✅ Deployment complete!"
