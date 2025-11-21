@@ -12,9 +12,7 @@ provider "aws" {
   region = var.region
 }
 
-# -------------------------
-# Generate SSH keypair (local) and upload public key to AWS
-# -------------------------
+# Generate SSH keypair (local) and optionally use user-provided public key
 resource "tls_private_key" "deployer" {
   algorithm = "RSA"
   rsa_bits  = 4096
@@ -22,7 +20,7 @@ resource "tls_private_key" "deployer" {
 
 resource "aws_key_pair" "deployer_key" {
   key_name   = "${var.project_name}-key"
-  public_key = tls_private_key.deployer.public_key_openssh
+  public_key = var.ssh_public_key != "" ? var.ssh_public_key : tls_private_key.deployer.public_key_openssh
 }
 
 resource "local_file" "deployer_private_key" {
@@ -31,17 +29,13 @@ resource "local_file" "deployer_private_key" {
   file_permission = "0600"
 }
 
-# -------------------------
 # S3 bucket for models
-# -------------------------
 resource "aws_s3_bucket" "model_bucket" {
   bucket = var.s3_bucket_name
   tags   = { Name = var.s3_bucket_name, Project = var.project_name }
 }
 
-# -------------------------
 # Secrets Manager (MongoDB)
-# -------------------------
 resource "aws_secretsmanager_secret" "mongodb" {
   name = "${var.project_name}-mongodb-uri"
 }
@@ -55,12 +49,9 @@ data "aws_secretsmanager_secret_version" "mongodb" {
   secret_id = aws_secretsmanager_secret.mongodb.id
 }
 
-# -------------------------
-# VPC / Subnet - use default
-# -------------------------
+# Use default VPC and choose a subnet if none provided
 data "aws_vpc" "default" { default = true }
 
-# If user didn't supply a subnet, pick one from the default VPC
 data "aws_subnets" "default_vpc_subnets" {
   filter {
     name   = "vpc-id"
@@ -69,20 +60,27 @@ data "aws_subnets" "default_vpc_subnets" {
 }
 
 locals {
-  selected_subnet_id = length(var.subnet_id) > 0 ? var.subnet_id : element(data.aws_subnets.default_vpc_subnets.ids, 0)
+  selected_subnet_id = var.subnet_id != "" ? var.subnet_id : data.aws_subnets.default_vpc_subnets.ids[0]
 }
 
-# -------------------------
+
+
 # IAM role & instance profile for EC2
-# -------------------------
 resource "aws_iam_role" "ec2_role" {
-  name = "icu-monitor-ec2-role-2"
+  name = "${var.project_name}-ec2-role"
   assume_role_policy = jsonencode({
     Version   = "2012-10-17",
     Statement = [{ Action = "sts:AssumeRole", Effect = "Allow", Principal = { Service = "ec2.amazonaws.com" } }]
   })
 }
 
+# Attach AmazonSSMManagedInstanceCore so Session Manager/browser connect works
+resource "aws_iam_role_policy_attachment" "ssm_core" {
+  role       = aws_iam_role.ec2_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+# Minimal custom policy for S3, SecretsManager, CloudWatch & SSM usage
 resource "aws_iam_policy" "ec2_policy" {
   name = "${var.project_name}-ec2-policy"
   policy = jsonencode({
@@ -91,7 +89,7 @@ resource "aws_iam_policy" "ec2_policy" {
       { Effect = "Allow", Action = ["s3:GetObject", "s3:ListBucket"], Resource = [aws_s3_bucket.model_bucket.arn, "${aws_s3_bucket.model_bucket.arn}/*"] },
       { Effect = "Allow", Action = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"], Resource = [aws_secretsmanager_secret.mongodb.arn] },
       { Effect = "Allow", Action = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"], Resource = ["*"] },
-      { Effect = "Allow", Action = ["ssm:SendCommand", "ssm:GetCommandInvocation"], Resource = ["*"] } # optional: SSM usage
+      { Effect = "Allow", Action = ["ssm:SendCommand", "ssm:GetCommandInvocation", "ssm:StartSession"], Resource = ["*"] }
     ]
   })
 }
@@ -102,13 +100,11 @@ resource "aws_iam_role_policy_attachment" "ec2_attach" {
 }
 
 resource "aws_iam_instance_profile" "ec2_profile" {
-  name = "icu-monitor-instance-profile-2"
+  name = "${var.project_name}-instance-profile"
   role = aws_iam_role.ec2_role.name
 }
 
-# -------------------------
-# Security Group (hardened)
-# -------------------------
+# Security Group
 resource "aws_security_group" "ml_backend_sg" {
   name   = "${var.project_name}-sg"
   vpc_id = data.aws_vpc.default.id
@@ -122,7 +118,16 @@ resource "aws_security_group" "ml_backend_sg" {
     description = "SSH from allowed CIDR"
   }
 
-  # Backend port (only API Gateway allowed)
+  # HTTP from internet to nginx (optional) - set to 0.0.0.0/0 by default
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "HTTP (nginx)"
+  }
+
+  # Backend port (only API Gateway allowed) - kept as before
   ingress {
     from_port   = var.backend_port
     to_port     = var.backend_port
@@ -141,19 +146,14 @@ resource "aws_security_group" "ml_backend_sg" {
   tags = { Name = "${var.project_name}-sg" }
 }
 
-# -------------------------
-# EC2 Instance (user-data installs CW agent & config, syncs models)
-# -------------------------
+# AMI: Ubuntu Jammy (Canonical)
 data "aws_ami" "ubuntu" {
   most_recent = true
-
-  owners = ["099720109477"] # Canonical
-
+  owners      = ["099720109477"] # Canonical
   filter {
     name   = "name"
     values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
   }
-
   filter {
     name   = "virtualization-type"
     values = ["hvm"]
@@ -177,8 +177,7 @@ resource "aws_instance" "ml_instance" {
     branch       = var.github_branch
     CWA_ZIP      = var.cwa_zip
     region       = var.region
-    project_name = "icu-monitor"
-    MONGO_URI    = data.aws_secretsmanager_secret_version.mongodb.secret_string
+    project_name = var.project_name
   })
 
   tags = { Name = "${var.project_name}-ml-instance" }
@@ -190,26 +189,23 @@ resource "aws_eip" "ml_eip" {
   depends_on = [aws_instance.ml_instance]
 }
 
-# -------------------------
 # CloudWatch Log Group (app logs)
-# -------------------------
 resource "aws_cloudwatch_log_group" "app_logs" {
   name              = "/aws/ec2/${aws_instance.ml_instance.id}/app"
   retention_in_days = var.log_retention_days
 }
 
-# -------------------------
 # CloudWatch Agent config SSM parameter (optional)
-# -------------------------
 resource "aws_ssm_parameter" "cw_agent_config" {
   name  = "/${var.project_name}/cloudwatch-agent-config"
   type  = "String"
   value = file("${path.module}/cloudwatch-agent-config.json")
+  lifecycle {
+    ignore_changes = [value]
+  }
 }
 
-# -------------------------
 # CloudWatch Dashboard
-# -------------------------
 resource "aws_cloudwatch_dashboard" "dashboard" {
   dashboard_name = "${var.project_name}-dashboard"
   dashboard_body = templatefile("${path.module}/cw-dashboard.json.tpl", {
@@ -218,9 +214,7 @@ resource "aws_cloudwatch_dashboard" "dashboard" {
   })
 }
 
-# -------------------------
-# Alarms: high CPU & disk
-# -------------------------
+# Alarms
 resource "aws_cloudwatch_metric_alarm" "high_cpu" {
   alarm_name          = "${var.project_name}-HighCPU"
   comparison_operator = "GreaterThanThreshold"
@@ -247,9 +241,7 @@ resource "aws_cloudwatch_metric_alarm" "high_disk" {
   alarm_description   = "Alarm when root disk > ${var.disk_alarm_threshold}% (CWAgent)"
 }
 
-# -------------------------
-# API Gateway (HTTP Proxy) — simple
-# -------------------------
+# API Gateway (HTTP Proxy)
 resource "aws_apigatewayv2_api" "http_api" {
   name          = "${var.project_name}-http-api"
   protocol_type = "HTTP"
@@ -274,3 +266,4 @@ resource "aws_apigatewayv2_stage" "default_stage" {
   name        = "$default"
   auto_deploy = true
 }
+
