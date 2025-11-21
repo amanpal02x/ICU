@@ -14,7 +14,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 2️⃣ SSH to EC2 and deploy
+      # 2️⃣ Configure AWS credentials
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # 3️⃣ SSH to EC2 and deploy backend
       - name: SSH to EC2 and deploy
         uses: appleboy/ssh-action@v0.1.10
         with:
@@ -43,9 +51,47 @@ jobs:
             pip install --upgrade pip
             pip install -r backend/requirements.txt
 
+            echo "☁️ Ensuring S3 bucket exists..."
+            if aws s3 ls "s3://${{ secrets.S3_BUCKET_NAME }}" 2>&1 | grep -q 'NoSuchBucket'; then
+                echo "🚀 Creating S3 bucket..."
+                aws s3 mb s3://${{ secrets.S3_BUCKET_NAME }} --region ${{ secrets.AWS_REGION }}
+            else
+                echo "☁️ S3 bucket exists, proceeding..."
+            fi
+
+            echo "☁️ Syncing models folder to S3..."
+            aws s3 sync backend/models s3://${{ secrets.S3_BUCKET_NAME }}/models --delete
+
             echo "🔄 Restarting ICU service..."
             sudo systemctl daemon-reload
             sudo systemctl enable icu
             sudo systemctl restart icu
 
-            echo "✅ Deployment complete!"
+      # 4️⃣ Update API Gateway only if backend URL changes
+      - name: Update API Gateway
+        run: |
+          set -e
+          API_ID="${{ secrets.ICU_API_ID }}"  # Store the stable API ID in repo secrets
+          STAGE_NAME="prod"
+          BACKEND_URL="http://${{ secrets.EC2_HOST }}:8000"
+
+          # Get current API target
+          CURRENT_TARGET=$(aws apigatewayv2 get-api --api-id "$API_ID" --query 'Target' --output text)
+
+          if [ "$CURRENT_TARGET" != "$BACKEND_URL" ]; then
+            echo "🔄 Backend URL changed. Updating API Gateway target..."
+            aws apigatewayv2 update-api \
+              --api-id "$API_ID" \
+              --target "$BACKEND_URL"
+
+            echo "🔄 Auto-deploying stage..."
+            aws apigatewayv2 update-stage \
+              --api-id "$API_ID" \
+              --stage-name "$STAGE_NAME" \
+              --auto-deploy
+
+            API_ENDPOINT="https://$(aws apigatewayv2 get-api --api-id $API_ID --query 'ApiEndpoint' --output text)/$STAGE_NAME/"
+            echo "✅ API Gateway updated! Endpoint: $API_ENDPOINT"
+          else
+            echo "✅ Backend URL unchanged. Skipping API Gateway update."
+          fi
