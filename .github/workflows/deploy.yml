@@ -30,7 +30,7 @@ jobs:
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            set -e  # Exit immediately if a command fails
+            set -e
 
             cd /opt/app/ICU
 
@@ -51,6 +51,15 @@ jobs:
             pip install --upgrade pip
             pip install -r backend/requirements.txt
 
+            echo "🐞 DEBUG: Checking S3 bucket variable"
+            echo "S3_BUCKET_NAME = '${{ secrets.S3_BUCKET_NAME }}'"
+            echo "AWS_REGION = '${{ secrets.AWS_REGION }}'"
+
+            if [ -z "${{ secrets.S3_BUCKET_NAME }}" ]; then
+              echo "❌ ERROR: S3_BUCKET_NAME secret is EMPTY!"
+              exit 1
+            fi
+
             echo "☁️ Ensuring S3 bucket exists..."
             if aws s3 ls "s3://${{ secrets.S3_BUCKET_NAME }}" 2>&1 | grep -q 'NoSuchBucket'; then
                 echo "🚀 Creating S3 bucket..."
@@ -67,24 +76,22 @@ jobs:
             sudo systemctl enable icu
             sudo systemctl restart icu
 
-      # 4️⃣ Update API Gateway only if backend URL changes
+      # 4️⃣ Update API Gateway
       - name: Update API Gateway
         run: |
           set -e
-          API_ID="${{ secrets.ICU_API_ID }}"  # Store the stable API ID in repo secrets
+          API_ID="${{ secrets.ICU_API_ID }}"
           STAGE_NAME="prod"
           BACKEND_URL="http://${{ secrets.EC2_HOST }}:8000"
 
-          # Get current API target
           CURRENT_TARGET=$(aws apigatewayv2 get-api --api-id "$API_ID" --query 'Target' --output text)
 
           if [ "$CURRENT_TARGET" != "$BACKEND_URL" ]; then
-            echo "🔄 Backend URL changed. Updating API Gateway target..."
+            echo "🔄 Updating API Gateway target..."
             aws apigatewayv2 update-api \
               --api-id "$API_ID" \
               --target "$BACKEND_URL"
 
-            echo "🔄 Auto-deploying stage..."
             aws apigatewayv2 update-stage \
               --api-id "$API_ID" \
               --stage-name "$STAGE_NAME" \
