@@ -30,10 +30,66 @@ jobs:
         working-directory: ./terraform
         run: terraform init -input=false
 
+      #############################################
+      # PRE-CHECK: SKIP APPLY IF RESOURCES EXIST #
+      #############################################
+      - name: Check for existing AWS resources (skip apply if found)
+        id: precheck
+        shell: bash
+        run: |
+          set -e
+
+          echo "Checking for pre-existing AWS resources..."
+
+          FOUND=0
+
+          # Key Pair
+          if aws ec2 describe-key-pairs --key-names "icu-deployer" >/dev/null 2>&1; then
+            echo "Existing key pair found"
+            FOUND=1
+          fi
+
+          # IAM Role
+          if aws iam get-role --role-name "icu-ec2-role" >/dev/null 2>&1; then
+            echo "Existing IAM role found"
+            FOUND=1
+          fi
+
+          # IAM Policy
+          if aws iam list-policies --scope Local | grep -q "icu-ec2-policy"; then
+            echo "Existing IAM policy found"
+            FOUND=1
+          fi
+
+          # Load Balancer
+          if aws elbv2 describe-load-balancers --names "icu-nlb" >/dev/null 2>&1; then
+            echo "Existing NLB found"
+            FOUND=1
+          fi
+
+          # Target Group
+          if aws elbv2 describe-target-groups --names "icu-tg" >/dev/null 2>&1; then
+            echo "Existing target group found"
+            FOUND=1
+          fi
+
+          echo "found=$FOUND" >> $GITHUB_OUTPUT
+
+      #############################################
+      # CONDITIONAL APPLY                         #
+      #############################################
       - name: Terraform Apply
+        if: steps.precheck.outputs.found == '0'
         working-directory: ./terraform
         run: terraform apply -auto-approve -var "project_name=icu-logicboots"
 
+      - name: Skip Apply (Resources already exist)
+        if: steps.precheck.outputs.found == '1'
+        run: echo "Skipping terraform apply because resources already exist."
+
+      #############################################
+      # OUTPUTS + DEPLOY STEPS (UNCHANGED)        #
+      #############################################
       - name: Fetch outputs + write PEM
         working-directory: ./terraform
         run: |
@@ -41,14 +97,13 @@ jobs:
           terraform output -raw ec2_public_ip > ../.ec2_ip || true
           terraform output -raw s3_bucket_name > ../.s3_bucket || true
           terraform output -raw sqs_queue_url > ../.sqs || true
-          terraform output -raw private_key_pem > ../deploy_key.pem
-          chmod 600 ../deploy_key.pem
+          terraform output -raw private_key_pem > ../deploy_key.pem || true
+          chmod 600 ../deploy_key.pem || true
 
       - name: Wait for EC2 (small sleep)
         run: sleep 15
 
       - name: Setup SSH key if IP exists
-        if: ${{ hashFiles('.ec2_ip') != '' }}
         run: |
           if [ -f ./.ec2_ip ] && [ -s ./.ec2_ip ]; then
             mkdir -p ~/.ssh
@@ -59,7 +114,6 @@ jobs:
           fi
 
       - name: Remote deploy (git pull & restart)
-        if: steps.fetch_outputs_conclusion == 'success' || true
         run: |
           if [ -f ./.ec2_ip ] && [ -s ./.ec2_ip ]; then
             IP=$(cat ./.ec2_ip)
