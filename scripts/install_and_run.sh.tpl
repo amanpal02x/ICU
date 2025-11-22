@@ -1,119 +1,163 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
+# values injected by Terraform templatefile:
 REPO_URL="${repo_url}"
 BRANCH="${branch}"
 APP_PORT=${app_port}
 APP_DIR="/opt/app/backend"
+S3_BUCKET="${s3_bucket_name}"
 SQS_QUEUE_URL="${sqs_queue_url}"
 AWS_REGION="${aws_region}"
+USER="ubuntu"
+SERVICE_NAME="icu-backend"
 
+# install base packages
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-pip git inotify-tools curl jq awscli
+DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-pip git inotify-tools curl jq unzip
 
 # ensure ubuntu user exists
-id -u ubuntu >/dev/null 2>&1 || useradd -m -s /bin/bash ubuntu
+id -u ${USER} >/dev/null 2>&1 || useradd -m -s /bin/bash ${USER}
 
+# create app dirs and permissions
 mkdir -p /opt/app
-chown ubuntu:ubuntu /opt/app || true
+chown ${USER}:${USER} /opt/app || true
+mkdir -p /opt/app/models
+chown -R ${USER}:${USER} /opt/app/models
 
 # clone or reset repo as ubuntu user
-if [ ! -d "$APP_DIR" ]; then
-  sudo -u ubuntu git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
+if [ ! -d "${APP_DIR}" ]; then
+  sudo -u ${USER} git clone --branch "${BRANCH}" "${REPO_URL}" "${APP_DIR}"
 else
-  cd "$APP_DIR"
-  sudo -u ubuntu git fetch --all
-  sudo -u ubuntu git reset --hard origin/$BRANCH
+  cd "${APP_DIR}"
+  sudo -u ${USER} git fetch --all
+  sudo -u ${USER} git reset --hard origin/"${BRANCH}"
 fi
 
-cd "$APP_DIR"
+cd "${APP_DIR}"
 
-# venv + deps
+# setup python venv and install deps (ensure boto3 present)
 python3 -m venv venv
-source venv/bin/activate
-pip install --upgrade pip
+${APP_DIR}/venv/bin/pip install --upgrade pip setuptools wheel
 if [ -f requirements.txt ]; then
-  pip install -r requirements.txt || true
+  ${APP_DIR}/venv/bin/pip install -r requirements.txt || true
+fi
+${APP_DIR}/venv/bin/pip install boto3 || true
+
+# create environment file used by systemd service (keeps values accessible on restart)
+cat >/etc/icu-backend.env <<EOF
+APP_DIR=${APP_DIR}
+APP_PORT=${APP_PORT}
+S3_BUCKET=${S3_BUCKET}
+SQS_QUEUE_URL=${SQS_QUEUE_URL}
+AWS_REGION=${AWS_REGION}
+USER=${USER}
+EOF
+chmod 600 /etc/icu-backend.env
+
+# initial sync of models (if bucket exists)
+if [ -n "${S3_BUCKET}" ]; then
+  /usr/bin/aws s3 sync "s3://${S3_BUCKET}/models" "${APP_DIR}/models" --region "${AWS_REGION}" || true
+  chown -R ${USER}:${USER} "${APP_DIR}/models" || true
 fi
 
-# model dir
-mkdir -p /opt/app/models
-chown -R ubuntu:ubuntu /opt/app/models
-
-# systemd service for backend
-cat >/etc/systemd/system/backend.service <<EOF
+# create systemd service for backend (production mode)
+cat >/etc/systemd/system/${SERVICE_NAME}.service <<EOF
 [Unit]
-Description=Backend App (uvicorn)
+Description=ICU Backend Service
 After=network.target
 
 [Service]
-User=ubuntu
-WorkingDirectory=/opt/app/backend
-Environment="PATH=/opt/app/backend/venv/bin"
-ExecStart=/opt/app/backend/venv/bin/uvicorn backend.main:app --host 0.0.0.0 --port ${app_port} --reload
+User=${USER}
+WorkingDirectory=${APP_DIR}
+EnvironmentFile=/etc/icu-backend.env
+ExecStart=${APP_DIR}/venv/bin/uvicorn backend.main:app --host 0.0.0.0 --port ${APP_PORT} --workers 1
 Restart=always
-RestartSec=3
+RestartSec=5
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# deploy helper
-cat >/usr/local/bin/deploy_pull_restart.sh <<EOF
+# deploy helper: "pull, sync, install deps, restart"
+cat >/usr/local/bin/deploy_pull_restart.sh <<'EOF'
 #!/usr/bin/env bash
-set -e
-cd /opt/app/backend
-sudo -u ubuntu git pull origin $BRANCH || true
-source /opt/app/backend/venv/bin/activate
-pip install -r requirements.txt || true
-systemctl restart backend.service
+set -euo pipefail
+source /etc/icu-backend.env
+cd "${APP_DIR}"
+# update code as ubuntu user
+sudo -u ${USER} git fetch --all
+sudo -u ${USER} git reset --hard origin/"${BRANCH}" || true
+# install deps
+${APP_DIR}/venv/bin/pip install -r ${APP_DIR}/requirements.txt || true
+# sync latest models
+if [ -n "${S3_BUCKET}" ]; then
+  /usr/bin/aws s3 sync "s3://${S3_BUCKET}/models" "${APP_DIR}/models" --region "${AWS_REGION}" || true
+  chown -R ${USER}:${USER} "${APP_DIR}/models" || true
+fi
+# restart service
+systemctl restart ${SERVICE_NAME}.service
 EOF
 chmod +x /usr/local/bin/deploy_pull_restart.sh
 
-# model watcher - polls SQS and downloads models
-cat >/usr/local/bin/model_watcher.py <<EOF
+# create model watcher (SQS poller) script
+cat >/usr/local/bin/model_watcher.py <<'EOF'
 #!/usr/bin/env python3
-import os, time, json, boto3
+import os, time, json, boto3, subprocess
 AWS_REGION = os.environ.get('AWS_REGION', '${aws_region}')
 QUEUE_URL = os.environ.get('SQS_QUEUE_URL', '${sqs_queue_url}')
-s3 = boto3.client('s3', region_name=AWS_REGION)
+S3_BUCKET = os.environ.get('S3_BUCKET', '${s3_bucket_name}')
+APP_DIR = os.environ.get('APP_DIR', '/opt/app/backend')
 sqs = boto3.client('sqs', region_name=AWS_REGION)
+s3 = boto3.client('s3', region_name=AWS_REGION)
+
+def sync_and_restart():
+    try:
+        subprocess.run(['/usr/bin/aws', 's3', 'sync', f"s3://{S3_BUCKET}/models", f"{APP_DIR}/models", '--region', AWS_REGION], check=True)
+        subprocess.run(['systemctl', 'restart', 'icu-backend.service'], check=True)
+    except Exception:
+        pass
 
 while True:
-    if not QUEUE_URL or QUEUE_URL == '':
+    if not QUEUE_URL:
         time.sleep(10)
         continue
-    resp = sqs.receive_message(QueueUrl=QUEUE_URL, MaxNumberOfMessages=5, WaitTimeSeconds=10)
-    for msg in resp.get('Messages', []):
-        body = msg.get('Body', '')
-        try:
-            j = json.loads(body)
-            records = j.get('Records', []) or []
-            for r in records:
-                bucket = r['s3']['bucket']['name']
-                key = r['s3']['object']['key']
-                if key.startswith('models/'):
-                    local_path = '/opt/app/models/' + key.split('/',1)[1]
-                    os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                    s3.download_file(bucket, key, local_path)
-        except Exception:
-            pass
-        sqs.delete_message(QueueUrl=QUEUE_URL, ReceiptHandle=msg['ReceiptHandle'])
-    time.sleep(1)
+    try:
+        resp = sqs.receive_message(QueueUrl=QUEUE_URL, MaxNumberOfMessages=5, WaitTimeSeconds=20)
+        for msg in resp.get('Messages', []):
+            try:
+                body = msg.get('Body', '')
+                j = json.loads(body)
+                records = j.get('Records', []) or []
+                do_sync = False
+                for r in records:
+                    key = r.get('s3', {}).get('object', {}).get('key', '')
+                    if key and key.startswith('models/'):
+                        do_sync = True
+                if do_sync:
+                    sync_and_restart()
+            except Exception:
+                pass
+            try:
+                sqs.delete_message(QueueUrl=QUEUE_URL, ReceiptHandle=msg['ReceiptHandle'])
+            except Exception:
+                pass
+    except Exception:
+        time.sleep(5)
 EOF
 chmod +x /usr/local/bin/model_watcher.py
 
-# systemd service for model watcher
+# systemd unit for model watcher
 cat >/etc/systemd/system/model-watcher.service <<EOF
 [Unit]
 Description=Model Watcher (polls SQS and downloads models)
 After=network.target
 
 [Service]
-User=ubuntu
-Environment="SQS_QUEUE_URL=${sqs_queue_url}"
-Environment="AWS_REGION=${aws_region}"
-ExecStart=/usr/bin/env python3 /usr/local/bin/model_watcher.py
+User=${USER}
+EnvironmentFile=/etc/icu-backend.env
+ExecStart=${APP_DIR}/venv/bin/python /usr/local/bin/model_watcher.py
 Restart=always
 RestartSec=5
 
@@ -121,10 +165,10 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
+# reload and start services
 systemctl daemon-reload
-systemctl enable backend.service
-systemctl enable model-watcher.service
-systemctl start backend.service || true
-systemctl start model-watcher.service || true
+systemctl enable --now ${SERVICE_NAME}.service
+systemctl enable --now model-watcher.service
 
-chown -R ubuntu:ubuntu /opt/app
+# ensure ownership
+chown -R ${USER}:${USER} /opt/app || true

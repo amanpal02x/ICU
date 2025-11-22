@@ -254,13 +254,15 @@ resource "aws_instance" "app" {
 
   user_data = base64encode(
     templatefile("${path.module}/../scripts/install_and_run.sh.tpl", {
-      repo_url      = var.git_repo_url
-      branch        = var.git_branch
-      app_port      = var.backend_port
-      sqs_queue_url = aws_sqs_queue.models_notifications.id
-      aws_region    = var.region
+      repo_url       = var.git_repo_url,
+      branch         = var.git_branch,
+      app_port       = var.backend_port,
+      sqs_queue_url  = aws_sqs_queue.models_notifications.id,
+      aws_region     = var.region,
+      s3_bucket_name = aws_s3_bucket.models_bucket.bucket
     })
   )
+
 
   tags = { Name = "icu-backend" }
 }
