@@ -88,6 +88,31 @@ jobs:
         run: echo "Skipping terraform apply because resources already exist."
 
       #############################################
+      # FETCH EC2 IP WHEN SKIPPING (NEW STEP)     #
+      #############################################
+      - name: Fetch EC2 IP from AWS (skip mode)
+        if: steps.precheck.outputs.found == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Fetching EC2 public IP by tag Name=icu-backend..."
+          EC2_IP=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=icu-backend" "Name=instance-state-name,Values=running" \
+            --query "Reservations[0].Instances[0].PublicIpAddress" \
+            --output text || true)
+
+          echo "Found EC2 IP: ${EC2_IP}"
+
+          if [ -z "${EC2_IP}" ] || [ "${EC2_IP}" = "None" ]; then
+            echo "ERROR: Could not find EC2 instance public IP for tag Name=icu-backend."
+            echo "Make sure the instance is running and has the tag Name=icu-backend."
+            exit 1
+          fi
+
+          echo "${EC2_IP}" > .ec2_ip
+
+      #############################################
       # OUTPUTS + DEPLOY STEPS                    #
       #############################################
       - name: Fetch outputs + write PEM
