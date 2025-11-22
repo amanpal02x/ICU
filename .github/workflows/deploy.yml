@@ -88,39 +88,95 @@ jobs:
         run: echo "Skipping terraform apply because resources already exist."
 
       #############################################
-      # OUTPUTS + DEPLOY STEPS (UNCHANGED)        #
+      # OUTPUTS + DEPLOY STEPS                    #
       #############################################
       - name: Fetch outputs + write PEM
+        if: steps.precheck.outputs.found == '0'
         working-directory: ./terraform
         run: |
+          set -euo pipefail
+
+          # Fetch outputs only when apply ran
           terraform output -raw api_invoke_url > ../.api_url || true
           terraform output -raw ec2_public_ip > ../.ec2_ip || true
           terraform output -raw s3_bucket_name > ../.s3_bucket || true
           terraform output -raw sqs_queue_url > ../.sqs || true
-          terraform output -raw private_key_pem > ../deploy_key.pem || true
-          chmod 600 ../deploy_key.pem || true
+
+          # Only write the PEM if terraform produced it
+          if terraform output -json private_key_pem >/dev/null 2>&1; then
+            terraform output -raw private_key_pem > ../deploy_key.pem || true
+            chmod 600 ../deploy_key.pem || true
+            echo "Wrote deploy_key.pem from terraform outputs"
+          else
+            echo "private_key_pem output not present (apply likely skipped or key created externally)"
+          fi
 
       - name: Wait for EC2 (small sleep)
         run: sleep 15
 
+      #############################################
+      # RESTORE SECRET KEY (skip mode) & VERIFY   #
+      #############################################
       - name: Restore existing SSH key (skip mode)
         if: steps.precheck.outputs.found == '1'
+        shell: bash
         run: |
+          set -euo pipefail
+
           mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+
+          # Write the secret preserving real newlines and strip CRLF if present
+          printf '%s\n' "${{ secrets.EC2_PRIVATE_KEY }}" | sed 's/\r$//' > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
 
+          echo "Saved SSH key to ~/.ssh/deploy_key"
+          echo "File size:"
+          ls -l ~/.ssh/deploy_key
+
+          # Verify the private key can produce a public key and print a fingerprint
+          if ssh-keygen -y -f ~/.ssh/deploy_key > /tmp/deploy_key.pub 2>/dev/null; then
+            echo "Private key parsed successfully. Fingerprint:"
+            ssh-keygen -lf /tmp/deploy_key.pub || true
+          else
+            echo "ERROR: Provided private key is invalid (ssh-keygen failed)."
+            echo "Make sure EC2_PRIVATE_KEY is the full multi-line PEM (including BEGIN/END lines)."
+            exit 1
+          fi
+
+      #############################################
+      # SETUP SSH KEY FOR DEPLOY (priority check) #
+      #############################################
       - name: Setup SSH key if IP exists
+        shell: bash
         run: |
-          if [ -f ./.ec2_ip ] && [ -s ./.ec2_ip ]; then
-            mkdir -p ~/.ssh
-            cp deploy_key.pem ~/.ssh/deploy_key
+          set -euo pipefail
+
+          if [ ! -f ./.ec2_ip ] || [ ! -s ./.ec2_ip ]; then
+            echo "No EC2 IP file present; skipping SSH setup"
+            exit 0
+          fi
+
+          mkdir -p ~/.ssh
+
+          # Priority: restored secret key (~/.ssh/deploy_key) if present, otherwise use terraform output deploy_key.pem
+          if [ -f ~/.ssh/deploy_key ] && [ -s ~/.ssh/deploy_key ]; then
+            echo "Using restored key at ~/.ssh/deploy_key"
+            chmod 600 ~/.ssh/deploy_key
+          elif [ -f ./deploy_key.pem ] && [ -s ./deploy_key.pem ]; then
+            echo "Using terraform-provided deploy_key.pem"
+            cp ./deploy_key.pem ~/.ssh/deploy_key
+            chmod 600 ~/.ssh/deploy_key
+          elif [ -f ../deploy_key.pem ] && [ -s ../deploy_key.pem ]; then
+            echo "Using terraform output deploy_key.pem (parent dir)"
+            cp ../deploy_key.pem ~/.ssh/deploy_key
             chmod 600 ~/.ssh/deploy_key
           else
-            echo "No EC2 IP found; skipping SSH deploy"
+            echo "No valid SSH key found (neither restored secret nor terraform output). Aborting SSH deploy."
+            exit 0
           fi
 
       - name: Remote deploy (git pull & restart)
+        shell: bash
         run: |
           if [ -f ./.ec2_ip ] && [ -s ./.ec2_ip ]; then
             IP=$(cat ./.ec2_ip)
