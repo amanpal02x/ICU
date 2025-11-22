@@ -12,6 +12,7 @@ env:
   ECR_REPO: "icu-backend"
   SSM_INSTANCE_ID: "i-0d2d46164fecbb5c1"
   DEPLOY_SCRIPT_PATH: "/opt/myapp/deploy_from_ecr.sh"
+  DEPLOY_S3_BUCKET: "icu-monitor-deploy-scripts"
 
 jobs:
   build-push-deploy:
