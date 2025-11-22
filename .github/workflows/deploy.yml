@@ -175,13 +175,13 @@ jobs:
             exit 0
           fi
 
-      - name: Remote deploy (git pull & restart)
+      - name: Remote deploy (run server helper + health check)
         shell: bash
         run: |
           if [ -f ./.ec2_ip ] && [ -s ./.ec2_ip ]; then
             IP=$(cat ./.ec2_ip)
-            scp -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key scripts/deploy.sh ubuntu@$IP:~/deploy.sh
-            ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ubuntu@$IP "bash ~/deploy.sh $IP"
+            # set APP_PORT and HEALTH_PATH to match your backend; change if needed
+            APP_PORT=8000 HEALTH_PATH=/health ./scripts/deploy.sh "$IP"
           else
             echo "No EC2 IP available. Terraform may have failed or still provisioning."
           fi
