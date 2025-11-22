@@ -103,6 +103,13 @@ jobs:
       - name: Wait for EC2 (small sleep)
         run: sleep 15
 
+      - name: Restore existing SSH key (skip mode)
+        if: steps.precheck.outputs.found == '1'
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
       - name: Setup SSH key if IP exists
         run: |
           if [ -f ./.ec2_ip ] && [ -s ./.ec2_ip ]; then
