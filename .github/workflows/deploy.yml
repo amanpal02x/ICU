@@ -1,214 +1,102 @@
-name: ci-cd
+name: Build -> ECR -> Deploy (SSM)
 
+# Trigger on push to main (change branch if needed)
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+
+env:
+  AWS_REGION: us-east-2          
+  AWS_ACCOUNT_ID: '601559288497'  # replace or set via GitHub secrets/env
+  ECR_REPO: 'icu-backend'         # repo name in ECR
+  SSM_INSTANCE_ID: 'i-0d2d46164fecbb5c1'  # EC2 instance ID to deploy to
+  DEPLOY_SCRIPT_PATH: '/opt/myapp/deploy_from_ecr.sh'  # script on EC2 to run
 
 jobs:
-  terraform-and-deploy:
+  build-push-deploy:
     runs-on: ubuntu-latest
-    env:
-      TF_IN_AUTOMATION: true
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
-        with:
-          terraform_version: 1.5.7
+      - name: Set IMAGE_TAG (short SHA)
+        id: vars
+        run: |
+          echo "IMAGE_TAG=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
-      - name: Configure AWS Credentials
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Terraform Init
-        working-directory: ./terraform
-        run: terraform init -input=false
-
-      #############################################
-      # PRE-CHECK: SKIP APPLY IF RESOURCES EXIST #
-      #############################################
-      - name: Check for existing AWS resources (skip apply if found)
-        id: precheck
-        shell: bash
+      - name: Ensure ECR repository exists
         run: |
-          set -e
-
-          echo "Checking for pre-existing AWS resources..."
-
-          FOUND=0
-
-          # Key Pair
-          if aws ec2 describe-key-pairs --key-names "icu-deployer" >/dev/null 2>&1; then
-            echo "Existing key pair found"
-            FOUND=1
-          fi
-
-          # IAM Role
-          if aws iam get-role --role-name "icu-ec2-role" >/dev/null 2>&1; then
-            echo "Existing IAM role found"
-            FOUND=1
-          fi
-
-          # IAM Policy
-          if aws iam list-policies --scope Local | grep -q "icu-ec2-policy"; then
-            echo "Existing IAM policy found"
-            FOUND=1
-          fi
-
-          # Load Balancer
-          if aws elbv2 describe-load-balancers --names "icu-nlb" >/dev/null 2>&1; then
-            echo "Existing NLB found"
-            FOUND=1
-          fi
-
-          # Target Group
-          if aws elbv2 describe-target-groups --names "icu-tg" >/dev/null 2>&1; then
-            echo "Existing target group found"
-            FOUND=1
-          fi
-
-          echo "found=$FOUND" >> $GITHUB_OUTPUT
-
-      #############################################
-      # CONDITIONAL APPLY                         #
-      #############################################
-      - name: Terraform Apply
-        if: steps.precheck.outputs.found == '0'
-        working-directory: ./terraform
-        run: terraform apply -auto-approve -var "project_name=icu-logicboots"
-
-      - name: Skip Apply (Resources already exist)
-        if: steps.precheck.outputs.found == '1'
-        run: echo "Skipping terraform apply because resources already exist."
-
-      #############################################
-      # FETCH EC2 IP WHEN SKIPPING (NEW STEP)     #
-      #############################################
-      - name: Fetch EC2 IP from AWS (skip mode)
-        if: steps.precheck.outputs.found == '1'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Fetching EC2 public IP by tag Name=icu-backend..."
-          EC2_IP=$(aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=icu-backend" "Name=instance-state-name,Values=running" \
-            --query "Reservations[0].Instances[0].PublicIpAddress" \
-            --output text || true)
-
-          echo "Found EC2 IP: ${EC2_IP}"
-
-          if [ -z "${EC2_IP}" ] || [ "${EC2_IP}" = "None" ]; then
-            echo "ERROR: Could not find EC2 instance public IP for tag Name=icu-backend."
-            echo "Make sure the instance is running and has the tag Name=icu-backend."
-            exit 1
-          fi
-
-          echo "${EC2_IP}" > .ec2_ip
-
-      #############################################
-      # OUTPUTS + DEPLOY STEPS                    #
-      #############################################
-      - name: Fetch outputs + write PEM
-        if: steps.precheck.outputs.found == '0'
-        working-directory: ./terraform
-        run: |
-          set -euo pipefail
-
-          # Fetch outputs only when apply ran
-          terraform output -raw api_invoke_url > ../.api_url || true
-          terraform output -raw ec2_public_ip > ../.ec2_ip || true
-          terraform output -raw s3_bucket_name > ../.s3_bucket || true
-          terraform output -raw sqs_queue_url > ../.sqs || true
-
-          # Only write the PEM if terraform produced it
-          if terraform output -json private_key_pem >/dev/null 2>&1; then
-            terraform output -raw private_key_pem > ../deploy_key.pem || true
-            chmod 600 ../deploy_key.pem || true
-            echo "Wrote deploy_key.pem from terraform outputs"
+          # create repo if it does not exist
+          if ! aws ecr describe-repositories --repository-names "${{ env.ECR_REPO }}" >/dev/null 2>&1; then
+            aws ecr create-repository --repository-name "${{ env.ECR_REPO }}" --region "${{ env.AWS_REGION }}"
+            echo "Created ECR repository: ${{ env.ECR_REPO }}"
           else
-            echo "private_key_pem output not present (apply likely skipped or key created externally)"
+            echo "ECR repository ${ECR_REPO} already exists"
           fi
 
-      - name: Wait for EC2 (small sleep)
-        run: sleep 15
-
-      #############################################
-      # RESTORE SECRET KEY (skip mode) & VERIFY   #
-      #############################################
-      - name: Restore existing SSH key (skip mode)
-        if: steps.precheck.outputs.found == '1'
-        shell: bash
+      - name: Login to ECR
         run: |
-          set -euo pipefail
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
 
-          mkdir -p ~/.ssh
-
-          # Write the secret preserving real newlines and strip CRLF if present
-          printf '%s\n' "${{ secrets.EC2_PRIVATE_KEY }}" | sed 's/\r$//' > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-
-          echo "Saved SSH key to ~/.ssh/deploy_key"
-          echo "File size:"
-          ls -l ~/.ssh/deploy_key
-
-          # Verify the private key can produce a public key and print a fingerprint
-          if ssh-keygen -y -f ~/.ssh/deploy_key > /tmp/deploy_key.pub 2>/dev/null; then
-            echo "Private key parsed successfully. Fingerprint:"
-            ssh-keygen -lf /tmp/deploy_key.pub || true
-          else
-            echo "ERROR: Provided private key is invalid (ssh-keygen failed)."
-            echo "Make sure EC2_PRIVATE_KEY is the full multi-line PEM (including BEGIN/END lines)."
-            exit 1
-          fi
-
-      #############################################
-      # SETUP SSH KEY FOR DEPLOY (priority check) #
-      #############################################
-      - name: Setup SSH key if IP exists
-        shell: bash
+      - name: Build Docker image (backend folder)
         run: |
-          set -euo pipefail
+          cd backend
+          docker build -t ${{ env.ECR_REPO }}:${{ steps.vars.outputs.IMAGE_TAG }} .
+          docker tag ${{ env.ECR_REPO }}:${{ steps.vars.outputs.IMAGE_TAG }} ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO }}:${{ steps.vars.outputs.IMAGE_TAG }}
 
-          if [ ! -f ./.ec2_ip ] || [ ! -s ./.ec2_ip ]; then
-            echo "No EC2 IP file present; skipping SSH setup"
-            exit 0
-          fi
-
-          mkdir -p ~/.ssh
-
-          # Priority: restored secret key (~/.ssh/deploy_key) if present, otherwise use terraform output deploy_key.pem
-          if [ -f ~/.ssh/deploy_key ] && [ -s ~/.ssh/deploy_key ]; then
-            echo "Using restored key at ~/.ssh/deploy_key"
-            chmod 600 ~/.ssh/deploy_key
-          elif [ -f ./deploy_key.pem ] && [ -s ./deploy_key.pem ]; then
-            echo "Using terraform-provided deploy_key.pem"
-            cp ./deploy_key.pem ~/.ssh/deploy_key
-            chmod 600 ~/.ssh/deploy_key
-          elif [ -f ../deploy_key.pem ] && [ -s ../deploy_key.pem ]; then
-            echo "Using terraform output deploy_key.pem (parent dir)"
-            cp ../deploy_key.pem ~/.ssh/deploy_key
-            chmod 600 ~/.ssh/deploy_key
-          else
-            echo "No valid SSH key found (neither restored secret nor terraform output). Aborting SSH deploy."
-            exit 0
-          fi
-      - name: Ensure deploy script is executable
-        run: chmod +x ./scripts/deploy.sh
-
-      - name: Remote deploy (run server helper + health check)
-        shell: bash
+      - name: Push image to ECR
         run: |
-          if [ -f ./.ec2_ip ] && [ -s ./.ec2_ip ]; then
-            IP=$(cat ./.ec2_ip)
-            # set APP_PORT and HEALTH_PATH to match your backend; change if needed
-            APP_PORT=8000 HEALTH_PATH=/health ./scripts/deploy.sh "$IP"
-          else
-            echo "No EC2 IP available. Terraform may have failed or still provisioning."
-          fi
+          docker push ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO }}:${{ steps.vars.outputs.IMAGE_TAG }}
+
+      - name: Trigger deploy on EC2 via SSM (run deploy script with tag)
+        id: ssm
+        run: |
+          IMAGE_TAG=${{ steps.vars.outputs.IMAGE_TAG }}
+          echo "Sending SSM command to instance: ${{ env.SSM_INSTANCE_ID }} to run ${DEPLOY_SCRIPT_PATH} ${IMAGE_TAG}"
+          aws ssm send-command \
+            --region ${{ env.AWS_REGION }} \
+            --instance-ids "${{ env.SSM_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy image ${IMAGE_TAG}" \
+            --parameters commands=["sudo ${DEPLOY_SCRIPT_PATH} ${IMAGE_TAG}"] \
+            --timeout-seconds 600 \
+            --output json > /tmp/ssm_resp.json
+          cat /tmp/ssm_resp.json
+          CMD_ID=$(jq -r '.Command.CommandId' /tmp/ssm_resp.json)
+          echo "SSM CommandId=$CMD_ID"
+          echo "cmd_id=$CMD_ID" >> $GITHUB_OUTPUT
+
+      - name: Wait for SSM command completion (poll)
+        run: |
+          CMD_ID="${{ steps.ssm.outputs.cmd_id }}"
+          INSTANCE="${{ env.SSM_INSTANCE_ID }}"
+          REGION="${{ env.AWS_REGION }}"
+          echo "Polling for SSM command ${CMD_ID} status..."
+          for i in {1..30}; do
+            STATUS=$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE" --region "$REGION" --query 'Status' --output text 2>/dev/null || echo "Pending")
+            echo "Attempt $i - status: $STATUS"
+            if [[ "$STATUS" == "Success" ]]; then
+              echo "SSM command succeeded"
+              exit 0
+            elif [[ "$STATUS" == "Failed" || "$STATUS" == "Cancelled" || "$STATUS" == "TimedOut" ]]; then
+              echo "SSM command ended with status: $STATUS"
+              aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE" --region "$REGION" --output json
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "SSM command did not complete within timeout"
+          exit 1
+
+      - name: Success notice
+        if: success()
+        run: echo "Image pushed and deploy triggered successfully: ${{ steps.vars.outputs.IMAGE_TAG }}"
+
