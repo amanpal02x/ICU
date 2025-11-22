@@ -25,7 +25,8 @@ fi
 echo "==> Deploy: invoking remote helper on ${EC2_IP}"
 
 # run the deploy helper on the server (must already exist as /usr/local/bin/deploy_pull_restart.sh)
-ssh ${SSH_OPTIONS} -i "${SSH_KEY}" "${SSH_USER}@${EC2_IP}" "sudo /usr/local/bin/deploy_pull_restart.sh" || {
+# run with sudo -H so helper can perform apt and write root-owned files when needed
+ssh ${SSH_OPTIONS} -i "${SSH_KEY}" "${SSH_USER}@${EC2_IP}" "sudo -H /usr/local/bin/deploy_pull_restart.sh" || {
   echo "Remote deploy helper failed. Attempting to gather logs..."
   ssh ${SSH_OPTIONS} -i "${SSH_KEY}" "${SSH_USER}@${EC2_IP}" "sudo journalctl -u ${SERVICE_NAME} -n 200 --no-pager" || true
   exit 1
