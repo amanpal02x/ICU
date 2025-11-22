@@ -84,22 +84,60 @@ EOF
 cat >/usr/local/bin/deploy_pull_restart.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-source /etc/icu-backend.env
-cd "$${APP_DIR}"
-# update code as ubuntu user
-sudo -u $${USER} git fetch --all
-sudo -u $${USER} git reset --hard origin/"${branch}" || true
-# install deps
-$${APP_DIR}/venv/bin/pip install -r $${APP_DIR}/requirements.txt || true
-# sync latest models
-if [ -n "${s3_bucket_name}" ]; then
-  /usr/bin/aws s3 sync "s3://${s3_bucket_name}/models" "$${APP_DIR}/models" --region "${aws_region}" || true
-  chown -R $${USER}:$${USER} "$${APP_DIR}/models" || true
+
+# source env if present
+if [ -f /etc/icu-backend.env ]; then
+  source /etc/icu-backend.env
 fi
-# restart service
-systemctl restart $${SERVICE_NAME}.service
+
+APP_DIR="${APP_DIR:-/opt/app/backend}"
+USER="${USER:-ubuntu}"
+AWS_REGION="${AWS_REGION:-us-east-2}"
+S3_BUCKET="${S3_BUCKET:-}"
+SERVICE_NAME="${SERVICE_NAME:-icu-backend}"
+BRANCH="${BRANCH:-main}"
+
+cd "${APP_DIR}" || exit 0
+
+# update repo safely
+sudo -u "${USER}" git fetch --all || true
+sudo -u "${USER}" git reset --hard origin/"${BRANCH}" || true
+
+# ensure venv & tooling
+if [ ! -d "${APP_DIR}/venv" ]; then
+  python3 -m venv "${APP_DIR}/venv"
+fi
+"${APP_DIR}/venv/bin/pip" install --upgrade pip setuptools wheel || true
+
+# install requirements if present
+if [ -f "${APP_DIR}/requirements.txt" ]; then
+  "${APP_DIR}/venv/bin/pip" install -r "${APP_DIR}/requirements.txt" || true
+fi
+
+# ensure uvicorn/boto3
+"${APP_DIR}/venv/bin/pip" install uvicorn boto3 || true
+
+# ensure awscli available (try system apt, else continue)
+if ! command -v aws >/dev/null 2>&1; then
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y awscli || true
+fi
+
+# ensure app models dir
+mkdir -p "${APP_DIR}/models"
+chown -R "${USER}:${USER}" "${APP_DIR}" || true
+
+# sync models if bucket set
+if [ -n "${S3_BUCKET}" ]; then
+  /usr/bin/aws s3 sync "s3://${S3_BUCKET}/models" "${APP_DIR}/models" --region "${AWS_REGION}" || true
+  chown -R "${USER}:${USER}" "${APP_DIR}/models" || true
+fi
+
+# restart
+systemctl restart "${SERVICE_NAME}.service" || true
 EOF
 chmod +x /usr/local/bin/deploy_pull_restart.sh
+
 
 # create model watcher (SQS poller) script
 cat >/usr/local/bin/model_watcher.py <<'EOF'
