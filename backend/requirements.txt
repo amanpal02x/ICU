@@ -7,7 +7,7 @@ numpy==1.26.3
 python-multipart==0.0.6
 
 # Computer Vision dependencies for disease prediction
-opencv-python==4.8.1.78
+opencv-python-headless==4.8.1.78
 Pillow==10.1.0
 tensorflow-cpu==2.16.1
 scikit-image==0.22.0
