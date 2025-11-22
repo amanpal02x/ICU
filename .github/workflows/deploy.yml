@@ -7,11 +7,11 @@ on:
       - main
 
 env:
-  AWS_REGION: us-east-2          
-  AWS_ACCOUNT_ID: '601559288497'  # replace or set via GitHub secrets/env
-  ECR_REPO: 'icu-backend'         # repo name in ECR
-  SSM_INSTANCE_ID: 'i-0d2d46164fecbb5c1'  # EC2 instance ID to deploy to
-  DEPLOY_SCRIPT_PATH: '/opt/myapp/deploy_from_ecr.sh'  # script on EC2 to run
+  AWS_REGION: us-east-2
+  AWS_ACCOUNT_ID: "601559288497"
+  ECR_REPO: "icu-backend"
+  SSM_INSTANCE_ID: "i-0d2d46164fecbb5c1"
+  DEPLOY_SCRIPT_PATH: "/opt/myapp/deploy_from_ecr.sh"
 
 jobs:
   build-push-deploy:
@@ -32,9 +32,11 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
       - name: Ensure ECR repository exists
         run: |
-          # create repo if it does not exist
           if ! aws ecr describe-repositories --repository-names "${{ env.ECR_REPO }}" >/dev/null 2>&1; then
             aws ecr create-repository --repository-name "${{ env.ECR_REPO }}" --region "${{ env.AWS_REGION }}"
             echo "Created ECR repository: ${{ env.ECR_REPO }}"
@@ -95,8 +97,9 @@ jobs:
           done
           echo "SSM command did not complete within timeout"
           exit 1
-
       - name: Success notice
         if: success()
-        run: echo "Image pushed and deploy triggered successfully: ${{ steps.vars.outputs.IMAGE_TAG }}"
-
+        env:
+          IMAGE_TAG: ${{ steps.vars.outputs.IMAGE_TAG }}
+        run: |
+          echo "Image pushed and deploy triggered successfully: $IMAGE_TAG"
