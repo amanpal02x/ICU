@@ -199,6 +199,8 @@ jobs:
             echo "No valid SSH key found (neither restored secret nor terraform output). Aborting SSH deploy."
             exit 0
           fi
+      - name: Ensure deploy script is executable
+        run: chmod +x ./scripts/deploy.sh
 
       - name: Remote deploy (run server helper + health check)
         shell: bash
