@@ -117,7 +117,7 @@ jobs:
         run: |
           if [ -f ./.ec2_ip ] && [ -s ./.ec2_ip ]; then
             IP=$(cat ./.ec2_ip)
-            scp -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key script/deploy.sh ubuntu@$IP:~/deploy.sh
+            scp -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key scripts/deploy.sh ubuntu@$IP:~/deploy.sh
             ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ubuntu@$IP "bash ~/deploy.sh $IP"
           else
             echo "No EC2 IP available. Terraform may have failed or still provisioning."
