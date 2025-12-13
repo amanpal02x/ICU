@@ -1,5 +1,6 @@
-# Stage 1: Build the frontend
+# Stage 1: Build frontend
 FROM node:18-alpine AS build
+
 WORKDIR /app
 
 COPY package*.json ./
@@ -8,12 +9,12 @@ RUN npm install
 COPY . .
 RUN npm run build
 
-# Stage 2: Nginx server
+# Stage 2: Serve with Nginx
 FROM nginx:stable-alpine
 
 COPY --from=build /app/dist /usr/share/nginx/html
-COPY default.conf.template /etc/nginx/conf.d/default.conf.template
+COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-EXPOSE 8080
+EXPOSE 80
 
-CMD ["sh", "-c", "envsubst '$PORT' < /etc/nginx/conf.d/default.conf.template > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"]
+CMD ["nginx", "-g", "daemon off;"]

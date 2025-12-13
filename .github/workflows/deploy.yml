@@ -1,4 +1,4 @@
-name: Deploy ICU Project to Cloud Run
+name: Deploy ICU Frontend & Backend to VM
 
 on:
   push:
@@ -8,19 +8,10 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      - name: Setup gcloud
-        uses: google-github-actions/setup-gcloud@v2
-        with:
-          project_id: ${{ secrets.GCP_PROJECT_ID }}
 
       - name: Docker Login
         uses: docker/login-action@v3
@@ -29,60 +20,42 @@ jobs:
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       # BACKEND
-      - name: Build & Push Backend Image
+      - name: Build & Push Backend
         run: |
-          docker build -t amanpal02/icu-back:latest ./backend
-          docker push amanpal02/icu-back:latest
+          docker build -t amanpal02/icu-backend:latest ./backend
+          docker push amanpal02/icu-backend:latest
 
-      - name: Deploy Backend to Cloud Run
+      # FRONTEND
+      - name: Build & Push Frontend
         run: |
-          gcloud run deploy icu-backend \
-            --image=amanpal02/icu-back:latest \
-            --region=us-central1 \
-            --platform=managed \
-            --allow-unauthenticated \
-            --port=8080
-            --timeout=900
+          docker build -t amanpal02/icu-frontend:latest ./frontend
+          docker push amanpal02/icu-frontend:latest
 
+      # DEPLOY
+      - name: Deploy on VM
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            docker pull amanpal02/icu-backend:latest
+            docker pull amanpal02/icu-frontend:latest
 
-      - name: Get Backend Public URL
-        run: |
-          echo "BACKEND_URL=$(gcloud run services describe icu-backend \
-            --region=us-central1 \
-            --format='value(status.url)')" >> $GITHUB_ENV
+            docker stop icu-backend icu-frontend || true
+            docker rm icu-backend icu-frontend || true
 
-      # FRONTEND (AUTO-INJECT BACKEND URL)
+            docker run -d \
+              --name icu-backend \
+              -p 8000:8000 \
+              -e MONGO_URI="${{ secrets.MONGO_URI }}" \
+              --restart unless-stopped \
+              amanpal02/icu-backend:latest
 
-      - name: Create frontend .env.production
-        run: |
-          echo "VITE_API_URL=$BACKEND_URL" > frontend/.env.production
-          cat frontend/.env.production
+            docker run -d \
+              --name icu-frontend \
+              -p 80:80 \
+              --restart unless-stopped \
+              amanpal02/icu-frontend:latest
 
-      - name: Build & Push Frontend Image
-        run: |
-          docker build -t amanpal02/icu-fron:latest ./frontend
-          docker push amanpal02/icu-fron:latest
-
-      - name: Deploy Frontend to Cloud Run
-        run: |
-          gcloud run deploy icu-frontend \
-            --image=amanpal02/icu-fron:latest \
-            --region=us-central1 \
-            --platform=managed \
-            --allow-unauthenticated \
-            --port=80
-
-      # PRINT URLS
-      - name: Get Frontend Public URL
-        run: |
-          echo "FRONTEND_URL=$(gcloud run services describe icu-frontend \
-            --region=us-central1 \
-            --format='value(status.url)')" >> $GITHUB_ENV
-
-      - name: Print Public URLs
-        run: |
-          echo "===================================="
-          echo "ICU DEPLOYED SUCCESSFULLY"
-          echo "Frontend URL:  $FRONTEND_URL"
-          echo "Backend URL:   $BACKEND_URL"
-          echo "===================================="
+            docker image prune -f
