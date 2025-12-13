@@ -1,6 +1,5 @@
 import asyncio
 import json
-import uvicorn
 import pandas as pd
 import itertools
 import joblib
@@ -95,9 +94,6 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://icu-ruby.vercel.app",
-        "https://b16mphiah2.execute-api.us-east-2.amazonaws.com/prod",
-        "https://main.d1xdxeg1kl0vq.amplifyapp.com"
-        "https://icu-1-r21u.onrender.com",
         "http://localhost:8080",
     ],
     allow_credentials=True,
@@ -124,9 +120,6 @@ async def health_check():
         "timestamp": _now_iso(),
         "cors_origins": [
             "https://icu-ruby.vercel.app",
-            "https://b16mphiah2.execute-api.us-east-2.amazonaws.com/prod",
-            "https://icu-1-r21u.onrender.com",
-            "https://main.d1xdxeg1kl0vq.amplifyapp.com"
             "http://localhost:8080",
         ]
     }
@@ -184,15 +177,15 @@ def load_model():
         if model is None:
              raise ValueError("Model artifact is corrupt or 'model' key is missing.")
         
-        print(f"✅ Successfully loaded AI model from: {MODEL_FILE}")
-        print(f"   Model features: {model_features}")
+        print(f"Successfully loaded AI model from: {MODEL_FILE}")
+        print(f"Model features: {model_features}")
 
     except FileNotFoundError:
-        print(f"❌ ERROR: Model file not found at {MODEL_FILE}")
+        print(f"ERROR: Model file not found at {MODEL_FILE}")
         model = None
     except Exception as e:
-        print(f"❌ CRITICAL ERROR: Failed to load model from {MODEL_FILE}.")
-        print(f"   This is likely a Python/library version mismatch or a corrupt file.")
+        print(f"CRITICAL ERROR: Failed to load model from {MODEL_FILE}.")
+        print(f"This is likely a Python/library version mismatch or a corrupt file.")
         print("\n" + "="*30 + " FULL ERROR " + "="*30)
         print(traceback.format_exc())
         print("="*62 + "\n")
@@ -212,7 +205,7 @@ def load_and_prepare_data():
         required_cols = ['patientid', 'window'] + list(THRESHOLDS.keys()) + model_features
         for col in required_cols:
             if col not in df.columns:
-                print(f"⚠️ WARNING: Missing expected column '{col}' in CSV. Skipping.")
+                print(f"WARNING: Missing expected column '{col}' in CSV. Skipping.")
 
         # 3. Normalize patientid to digits-only strings (e.g. '010' -> '10')
         if 'patientid' in df.columns:
@@ -239,16 +232,16 @@ def load_and_prepare_data():
 
         # 6. Convert to list-of-records for playback
         patient_data_by_window = df_filtered.to_dict('records')
-        print(f"✅ Successfully loaded and filtered data for target patients.")
-        print(f"   Total rows: {len(df_filtered)}, Max window: {max_window}")
+        print(f"Successfully loaded and filtered data for target patients.")
+        print(f"Total rows: {len(df_filtered)}, Max window: {max_window}")
 
     except FileNotFoundError:
-        print(f"❌ CRITICAL ERROR: Data file not found at {DATA_FILE}")
+        print(f"CRITICAL ERROR: Data file not found at {DATA_FILE}")
     except ValueError as e:
-        print(f"❌ CRITICAL ERROR: Failed to load or prepare data.")
-        print(f"   {e}")
+        print(f"CRITICAL ERROR: Failed to load or prepare data.")
+        print(f"{e}")
     except Exception as e:
-        print(f"❌ CRITICAL ERROR: Could not process data file {DATA_FILE}.")
+        print(f"CRITICAL ERROR: Could not process data file {DATA_FILE}.")
         print("\n" + "="*30 + " FULL ERROR " + "="*30)
         print(traceback.format_exc())
         print("="*62 + "\n")
@@ -570,48 +563,62 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @app.on_event("startup")
 async def on_startup():
-    """Run this once when the server starts."""
+    print("Application startup begin")
+
+    # Mongo: do NOT crash if missing
+    try:
+        if os.environ.get("MONGO_URI"):
+            await mongo_config.connect_to_mongo()
+            print("MongoDB connected")
+        else:
+            print("MONGO_URI not set, skipping MongoDB")
+    except Exception as e:
+        print("Mongo startup failed:", e)
+
+    # Load CSV / models lazily (NOT blocking)
+    try:
+        asyncio.create_task(init_background_services())
+    except Exception as e:
+        print("Background init failed:", e)
+
+    print("Startup finished (server can accept traffic)")
+
+# if __name__ == "__main__":
+#     port = int(os.environ.get("PORT", 8000)) # Default port
+#     disable_reload = os.environ.get("DISABLE_DEV_RELOAD", "false").lower() == "true"
+
+#     print(f"Starting Uvicorn on 0.0.0.0:{port}")
+#     if disable_reload:
+#         print("Production mode: reload disabled for better performance")
+#         uvicorn.run(
+#             "main:app",
+#             host="0.0.0.0",
+#             port=port,
+#             reload=False
+#         )
+#     else:
+#         print("Development mode: reload enabled for development")
+#         uvicorn.run(
+#             "main:app",
+#             host="0.0.0.0",
+#             port=port,
+#             reload=True # Keep reload for local dev
+#         )
+
+
+async def init_background_services():
     global use_real_monitor_data, monitor_processor
 
-    print("--- Server starting up... ---")
+    await asyncio.sleep(1)  # let server start FIRST
 
-    # Connect to MongoDB
-    await mongo_config.connect_to_mongo()
-
-    # Determine data source mode
     use_real_monitor_data = os.environ.get("USE_REAL_MONITOR_DATA", "false").lower() == "true"
 
     if use_real_monitor_data:
-        print("🩺 Initializing REAL MONITOR data mode")
-        # Initialize monitor processor instead of loading CSV data
+        print("Real monitor mode")
         monitor_processor = UniversalMonitorProcessor()
     else:
-        print("📄 Initializing CSV MOCK data mode")
-        # Load ICU monitoring data (CSV)
+        print("CSV mock mode")
         load_and_prepare_data()
 
     asyncio.create_task(data_broadcast_loop())
-    print("--- Application startup complete. ---")
 
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000)) # Default port
-    disable_reload = os.environ.get("DISABLE_DEV_RELOAD", "false").lower() == "true"
-
-    print(f"--- Starting Uvicorn on 0.0.0.0:{port} ---")
-    if disable_reload:
-        print("⚙️ Production mode: reload disabled for better performance")
-        uvicorn.run(
-            "main:app",
-            host="0.0.0.0",
-            port=port,
-            reload=False
-        )
-    else:
-        print("🔄 Development mode: reload enabled for development")
-        uvicorn.run(
-            "main:app",
-            host="0.0.0.0",
-            port=port,
-            reload=True # Keep reload for local dev
-        )
