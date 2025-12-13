@@ -28,27 +28,6 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      # FRONTEND (AUTO-INJECT BACKEND URL)
-
-      - name: Create frontend .env.production
-        run: |
-          echo "VITE_API_URL=$BACKEND_URL" > frontend/.env.production
-          cat frontend/.env.production
-
-      - name: Build & Push Frontend Image
-        run: |
-          docker build -t amanpal02/icu-fron:latest ./frontend
-          docker push amanpal02/icu-fron:latest
-
-      - name: Deploy Frontend to Cloud Run
-        run: |
-          gcloud run deploy icu-frontend \
-            --image=amanpal02/icu-fron:latest \
-            --region=us-central1 \
-            --platform=managed \
-            --allow-unauthenticated \
-            --port=80
-            --timeout=300
       # BACKEND
       - name: Build & Push Backend Image
         run: |
@@ -72,6 +51,26 @@ jobs:
             --region=us-central1 \
             --format='value(status.url)')" >> $GITHUB_ENV
 
+      # FRONTEND (AUTO-INJECT BACKEND URL)
+
+      - name: Create frontend .env.production
+        run: |
+          echo "VITE_API_URL=$BACKEND_URL" > frontend/.env.production
+          cat frontend/.env.production
+
+      - name: Build & Push Frontend Image
+        run: |
+          docker build -t amanpal02/icu-fron:latest ./frontend
+          docker push amanpal02/icu-fron:latest
+
+      - name: Deploy Frontend to Cloud Run
+        run: |
+          gcloud run deploy icu-frontend \
+            --image=amanpal02/icu-fron:latest \
+            --region=us-central1 \
+            --platform=managed \
+            --allow-unauthenticated \
+            --port=80
 
       # PRINT URLS
       - name: Get Frontend Public URL
