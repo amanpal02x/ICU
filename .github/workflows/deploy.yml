@@ -42,7 +42,7 @@ jobs:
             --platform=managed \
             --allow-unauthenticated \
             --port=8080
-            --timeout=300
+            --timeout=900
 
 
       - name: Get Backend Public URL
