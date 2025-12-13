@@ -1,58 +1,86 @@
-name: Deploy Backend via ECR & EC2
+name: Deploy ICU Project to Cloud Run
 
 on:
   push:
-    branches: ["main"]
-
-env:
-  AWS_REGION: us-east-2
-  ECR_REPO: icu-backend
-  IMAGE_TAG: latest
+    branches:
+      - main
 
 jobs:
-  build_and_push:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Login to ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build & Push Image
-        run: |
-          IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPO }}:${{ env.IMAGE_TAG }}"
-          docker build -t $IMAGE_URI backend/
-          docker push $IMAGE_URI
-          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
-
   deploy:
     runs-on: ubuntu-latest
-    needs: build_and_push
-
     steps:
-      - name: SSH Deploy on EC2
-        uses: appleboy/ssh-action@v0.1.7
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            echo "Logging into ECR..."
-            aws ecr get-login-password --region us-east-2 | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-            cd /opt/app/ICU
-            sed -i "s|image:.*|image: ${{ env.IMAGE_URI }}|g" docker-compose.yml
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
 
-            docker compose pull
-            docker compose down
-            docker compose up -d
+      - name: Docker Login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # BACKEND
+      - name: Build & Push Backend Image
+        run: |
+          docker build -t amanpal02/icu-back:latest ./backend
+          docker push amanpal02/icu-back:latest
+
+      - name: Deploy Backend to Cloud Run
+        run: |
+          gcloud run deploy icu-backend \
+            --image=amanpal02/icu-back:latest \
+            --region=${{ secrets.GCP_REGION }} \
+            --platform=managed \
+            --allow-unauthenticated \
+            --port=8080
+
+      - name: Get Backend Public URL
+        run: |
+          echo "BACKEND_URL=$(gcloud run services describe icu-backend \
+            --region=${{ secrets.GCP_REGION }} \
+            --format='value(status.url)')" >> $GITHUB_ENV
+
+      # FRONTEND (AUTO-INJECT BACKEND URL)
+
+      - name: Create frontend .env.production
+        run: |
+          echo "VITE_API_URL=$BACKEND_URL" > frontend/.env.production
+          cat frontend/.env.production
+
+      - name: Build & Push Frontend Image
+        run: |
+          docker build -t amanpal02/icu-fron:latest ./frontend
+          docker push amanpal02/icu-fron:latest
+
+      - name: Deploy Frontend to Cloud Run
+        run: |
+          gcloud run deploy icu-frontend \
+            --image=amanpal02/icu-fron:latest \
+            --region=${{ secrets.GCP_REGION }} \
+            --platform=managed \
+            --allow-unauthenticated \
+            --port=80
+
+      # PRINT URLS
+      - name: Get Frontend Public URL
+        run: |
+          echo "FRONTEND_URL=$(gcloud run services describe icu-frontend \
+            --region=${{ secrets.GCP_REGION }} \
+            --format='value(status.url)')" >> $GITHUB_ENV
+
+      - name: Print Public URLs
+        run: |
+          echo "===================================="
+          echo "ICU DEPLOYED SUCCESSFULLY"
+          echo "Frontend URL:  $FRONTEND_URL"
+          echo "Backend URL:   $BACKEND_URL"
+          echo "===================================="

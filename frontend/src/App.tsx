@@ -67,7 +67,7 @@ const App = () => (
       <Sonner />
       <AuthProvider>
         <RoleProvider>
-          <BrowserRouter future={{ v7_relativeSplatPath: true }}>
+          <BrowserRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
             <Routes>
               <Route path="/login" element={<LoginPage />} />
               <Route path="/signup" element={<SignupPage />} />

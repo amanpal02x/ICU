@@ -1,37 +1,33 @@
-FROM python:3.11-slim
 
-ENV DEBIAN_FRONTEND=noninteractive \
-  PYTHONUNBUFFERED=1 \
-  PYTHONDONTWRITEBYTECODE=1
+# stage 1 builder
+FROM python:3.11-slim AS builder
 
 WORKDIR /app
+ENV DEBIAN_FRONTEND=noninteractive
 
-# Basic system deps needed by some Python wheels (opencv-headless, pillow, etc.)
-RUN apt-get update && \
-  apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y \
   build-essential \
   gcc \
+  libgl1 \
   libglib2.0-0 \
-  libsm6 \
-  libxrender1 \
-  libxext6 \
-  curl \
   && rm -rf /var/lib/apt/lists/*
 
-# Install Python deps
 COPY requirements.txt .
-RUN pip install --upgrade pip setuptools wheel && \
-  pip install --no-cache-dir -r requirements.txt
 
-# Copy app source
+RUN pip install --upgrade pip
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# stage 2 runtime
+
+FROM python:3.11-slim
+WORKDIR /app
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+  libgl1 \
+  libglib2.0-0 \
+  && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /install /usr/local
 COPY . /app
-RUN mkdir -p /app/models
 
-# Create non-root user
-RUN groupadd -r appgroup && useradd -r -g appgroup appuser && chown -R appuser:appgroup /app
-USER appuser
-
-EXPOSE 8000
-
-# adjust the module path if your FastAPI app is in a submodule (e.g., app.main)
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "main.py"]

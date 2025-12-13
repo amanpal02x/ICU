@@ -5,17 +5,19 @@ frontend/node_modules/.cache/
 .env.*
 .env
 
-# Terraform state files
-*.tfstate
-*.tfstate.*
-*.tfvars
-*.tfvars.json
-# ignore terraform local directories & provider binaries
-**/.terraform/*
-.terraform/
-
-# ignore terraform local directories & provider binaries
-**/.terraform/*
-terraform/.terraform/
-.terraform/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+venv/
+env/
+build/
+dist/
+*.db
+*.sqlite3
+node_modules/
+data/
+datasets/
+tmp/
 

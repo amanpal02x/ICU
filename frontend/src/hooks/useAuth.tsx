@@ -59,7 +59,7 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:10000';
 
 // Auth bypass configuration
-const AUTH_BYPASS_MODE = true; // Set to true in development to bypass authentication
+const AUTH_BYPASS_MODE: boolean = true; // Set to true in development to bypass authentication
 
 // Create the AuthProvider component
 export const AuthProvider = ({ children }: { children: ReactNode }) => {

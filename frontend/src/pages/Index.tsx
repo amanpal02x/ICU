@@ -53,7 +53,7 @@ const Index = () => {
 
   const { role } = useRole();
 
-  const WEBSOCKET_URL = import.meta.env.VITE_API_URL.replace('http://', 'ws://').replace('https://', 'wss://') + "/ws";
+  const WEBSOCKET_URL = import.meta.env.DEV ? 'ws://localhost:8000/ws' : (import.meta.env.VITE_API_URL.replace('http://', 'ws://').replace('https://', 'wss://') + "/ws");
   const { data: wsData, error: wsError } = useWebSocket(WEBSOCKET_URL);
 
   useEffect(() => {

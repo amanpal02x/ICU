@@ -29,6 +29,7 @@ import routers.departments as departments
 import routers.appointments as appointments
 import routers.auth as auth
 import routers.disease_prediction as disease_prediction
+import routers.wound_prediction as wound_prediction
 import routers.monitor_data as monitor_data
 import routers.admin as admin
 
@@ -148,6 +149,7 @@ app.include_router(patients.router)
 app.include_router(departments.router)
 app.include_router(appointments.router)
 app.include_router(disease_prediction.router)
+app.include_router(wound_prediction.router)
 app.include_router(monitor_data.router)
 app.include_router(admin.router)
 

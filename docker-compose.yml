@@ -1,9 +1,0 @@
-version: "3.9"
-
-services:
-  backend:
-    image: <to-be-replaced-by-github-actions>
-    container_name: icu-backend
-    ports:
-      - "8000:8000"
-    restart: always
