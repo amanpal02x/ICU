@@ -7,15 +7,15 @@ numpy==1.26.3
 python-multipart==0.0.6
 
 # Computer Vision dependencies for disease prediction
-# opencv-python-headless==4.8.1.78
-# Pillow==10.1.0
-# tensorflow-cpu==2.16.1
-# scikit-image==0.22.0
+opencv-python-headless==4.8.1.78
+Pillow==10.1.0
+tensorflow-cpu==2.16.1
+scikit-image==0.22.0
 
 # PyTorch dependencies for wound prediction model
-# torch==2.1.2
-# torchvision==0.16.2
-# torchaudio==2.1.2
+torch==2.1.2
+torchvision==0.16.2
+torchaudio==2.1.2
 
 # MongoDB dependencies
 pymongo==4.6.1
