@@ -38,7 +38,7 @@ jobs:
         run: |
           gcloud run deploy icu-backend \
             --image=amanpal02/icu-back:latest \
-            --region=${{ secrets.GCP_REGION }} \
+            --region=us-central1 \
             --platform=managed \
             --allow-unauthenticated \
             --port=8080
@@ -46,7 +46,7 @@ jobs:
       - name: Get Backend Public URL
         run: |
           echo "BACKEND_URL=$(gcloud run services describe icu-backend \
-            --region=${{ secrets.GCP_REGION }} \
+            --region=us-central1 \
             --format='value(status.url)')" >> $GITHUB_ENV
 
       # FRONTEND (AUTO-INJECT BACKEND URL)
@@ -74,7 +74,7 @@ jobs:
       - name: Get Frontend Public URL
         run: |
           echo "FRONTEND_URL=$(gcloud run services describe icu-frontend \
-            --region=${{ secrets.GCP_REGION }} \
+            --region=us-central1 \
             --format='value(status.url)')" >> $GITHUB_ENV
 
       - name: Print Public URLs
